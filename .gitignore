@@ -1,0 +1,13 @@
+# Vendor board SDK — 1.2 GB, unmodified reference material, never edited here
+JC3248W535EN/
+
+# Claude Code project-local directory
+.claude/
+
+# Arduino IDE build artifacts (*.cpp.tmp.XXXXX.hash files left in sketch folder)
+LilFishTerminal/*.tmp.*
+
+# Compiled outputs
+*.bin
+*.elf
+build/
