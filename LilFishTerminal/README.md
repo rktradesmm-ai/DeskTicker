@@ -39,10 +39,9 @@ In Arduino IDE → Preferences → Additional Boards Manager URLs, add:
 ```
 https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
 ```
-Install **esp32 by Espressif Systems v3.0.2** (exact version required).
+Install **esp32 by Espressif Systems v3.3.8**. Tested on v3.3.8; earlier 3.0.x cores also work but are no longer the recommended baseline.
 
-After installing, replace the ESP32-S3 board file as instructed in the JC3248W535EN documentation
-(`JC3248W535EN/6-User_Manual/` → "Must see for use.txt").
+> **Note:** The JC3248W535EN "Must see for use.txt" board-file swap applies only to the vendor MJPEG demo and is **not** needed for this project — use the stock **ESP32S3 Dev Module** board as listed in the table above.
 
 ### 3. Install Libraries
 
@@ -125,7 +124,9 @@ Market data is fetched from Yahoo Finance's public chart API (HTTPS, no account 
 The 4H timeframe is synthesised on-device by aggregating four consecutive 1H bars.
 
 If Yahoo Finance is unreachable on both primary and fallback hosts (HTTP −1), the device
-reconnects WiFi automatically and retries.
+reconnects WiFi automatically and retries. On a brief WiFi drop the chart stays on screen
+with a small "Reconnecting…" note in the header; only after ~15 s of failed retries does
+it fall back to the full "Connecting to WiFi…" screen.
 
 ---
 
