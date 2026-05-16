@@ -49,8 +49,16 @@ S_CHART → S_FETCH (refresh interval, swipe, auto-cycle, market close)
 S_AFTER_HOURS → S_FETCH (re-check every 5 min, swipe, auto-cycle)
               → S_RECONNECT (WiFi lost)
 
-S_RECONNECT → S_CONNECTING
+S_RECONNECT → S_FETCH (soft reconnect succeeded, chart was visible — chart stays on screen)
+            → S_NTP_SYNC (soft reconnect succeeded but NTP was never done)
+            → S_CONNECTING (soft window exhausted, or no chart visible — full screen)
 ```
+
+`S_RECONNECT` tries up to `RECONNECT_SOFT_TRIES` × `RECONNECT_SOFT_MS` silent
+reconnects while the chart stays on screen ("Reconnecting…" in header). Only
+falls back to the full `S_CONNECTING` screen if the network stays down for the
+whole soft window, or if no chart is currently visible (e.g. first-boot,
+after-hours).
 
 ---
 
@@ -64,7 +72,8 @@ if (LV_LOCK()) {
     LV_UNLOCK();
 }
 ```
-`LV_LOCK()` = `bsp_display_lock(0)`, `LV_UNLOCK()` = `bsp_display_unlock()`.
+`LV_LOCK()` = `bsp_display_lock(2000)`, `LV_UNLOCK()` = `bsp_display_unlock()`.
+The timeout is **2000 ms, not 0**. `bsp_display_lock(0)` maps to `portMAX_DELAY` (infinite wait). The vendor flush callback (`bsp_display_sync_cb`) holds `lvgl_mux` while waiting for the panel's tearing-effect interrupt with `portMAX_DELAY`; if a TE interrupt is missed, the LVGL task is stuck forever holding the mutex and an infinite-wait `LV_LOCK()` in the main loop never returns → total freeze requiring power cycle. A 2 s timeout lets the main loop skip the update and retry, converting a permanent freeze into a brief self-healing stall.
 Forgetting the lock causes silent corruption or crashes.
 
 ### Screen Lifecycle (pending_del_scr)
@@ -83,12 +92,15 @@ When `chart_created == true`, the chart is already visible. Avoid displacing it 
 ```cpp
 bool bg_refresh = chart_created;
 if (!bg_refresh) show_connecting("Fetching...");
-else             chart_screen_set_status("Fetching...");
+else { /* one locked set_status("Fetching…") — see below */ }
 // ... fetch ...
 hide_connecting();
-if (bg_refresh) chart_screen_set_status("");
+// on success, inside the final chart_screen_update() lock:
+//   chart_screen_set_status("");  chart_screen_update(...);
 ```
 On fetch failure during bg_refresh, write the error to `chart_screen_set_status()` (NOT `show_error()`) — `show_error()` creates a persistent label on `chart_scr` with no cleanup path.
+
+**Exactly ONE locked `chart_screen_set_status` write before the fetch; the clear is folded into the final `chart_screen_update()` lock (not a separate lock block).** Each standalone locked label write is a separate LVGL flush. The original code had `set_status("Fetching…")` + `set_status("")` as two separate lock blocks → two extra flushes on top of the gesture flush and the full-redraw flush → 4 back-to-back flushes maximized the probability of hitting the vendor TE-sync race in `bsp_display_sync_cb` / `bsp_display_sync_task` → device freeze. Rule: one set (before fetch), zero-cost clear (inside the redraw lock).
 
 ### Gesture Flags
 Swipe flags are `volatile int8_t` set by the LVGL task and read+cleared by the main loop.

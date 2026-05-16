@@ -40,7 +40,9 @@
 
 // ── Config ────────────────────────────────────────────────────────────────────
 #define LVGL_ROTATION     LV_DISP_ROT_90
-#define WIFI_RETRY        3
+#define WIFI_RETRY             3
+#define RECONNECT_SOFT_TRIES   3     // quick reconnect attempts before showing full screen
+#define RECONNECT_SOFT_MS   5000     // per-attempt timeout ms (~15 s total soft window)
 #define NTP_SERVER        "pool.ntp.org"
 #define RESET_BTN_GPIO    0   // BOOT button on ESP32-S3 — hold 3 s to re-run setup
 
@@ -88,7 +90,7 @@ static bool        chart_displaced  = false;
 static bool        ntp_synced       = false;
 
 // ── LVGL helper macros ────────────────────────────────────────────────────────
-#define LV_LOCK()   bsp_display_lock(0)
+#define LV_LOCK()   bsp_display_lock(2000)  // 2 s timeout — prevents permanent freeze if vendor TE flush stalls
 #define LV_UNLOCK() bsp_display_unlock()
 
 // ── Safe screen deletion ──────────────────────────────────────────────────────
@@ -371,6 +373,10 @@ void loop() {
             snprintf(msg, sizeof(msg), "Fetching %s...", cfg.assets[cur_idx]);
             show_connecting(msg);
         } else {
+            // Chart stays visible — show a loading hint in the header status label.
+            // Exactly ONE locked write here; the clear is folded into the final
+            // chart_screen_update() lock below (no standalone clear = no extra flush
+            // in the vendor TE-sync race window that previously froze the device).
             char stsmsg[28];
             snprintf(stsmsg, sizeof(stsmsg), "Fetching %s...", cfg.assets[cur_idx]);
             if (LV_LOCK()) { chart_screen_set_status(stsmsg); LV_UNLOCK(); }
@@ -382,9 +388,6 @@ void loop() {
         // Always call hide_connecting — no-op when conn_scr is null, but correctly
         // queues conn_scr for deletion if WiFi reconnect had displaced the chart.
         hide_connecting();
-        if (bg_refresh) {
-            if (LV_LOCK()) { chart_screen_set_status(""); LV_UNLOCK(); }
-        }
 
         if (!ok) {
             // When the chart is already visible (bg_refresh), show the error in the
@@ -471,6 +474,7 @@ void loop() {
             // When chart_displaced is false (plain background refresh), the chart
             // screen was never replaced — skip lv_scr_load to avoid the flash.
             if (LV_LOCK()) {
+                chart_screen_set_status("");  // clear "Fetching…" hint — same lock, no extra flush
                 chart_screen_update(&asset_data[cur_idx], &cfg, wifi_is_connected());
                 LV_UNLOCK();
             }
@@ -588,12 +592,35 @@ void loop() {
     }
 
     // ── WiFi lost, try to reconnect ───────────────────────────────────────
-    case S_RECONNECT:
+    case S_RECONNECT: {
         Serial.println("WiFi lost, reconnecting...");
-        wifi_retries = 0;
-        state = S_CONNECTING;
-        delay(2000);
+        // If the chart is already on screen, attempt a quick silent reconnect
+        // without displacing it — just show a small header note. Only fall back
+        // to the full "Connecting…" screen if the soft window is exhausted.
+        bool keep_visible = chart_created && !chart_displaced;
+        if (keep_visible) {
+            if (LV_LOCK()) { chart_screen_set_status("Reconnecting..."); LV_UNLOCK(); }
+            for (int i = 0; i < RECONNECT_SOFT_TRIES; i++) {
+                if (wifi_connect(cfg.wifi_ssid, cfg.wifi_pass, RECONNECT_SOFT_MS)) {
+                    Serial.println("WiFi reconnected (chart kept visible)");
+                    wifi_retries  = 0;
+                    last_fetch_ms = 0;  // force immediate refresh
+                    // System time survives a brief drop — skip NTP screen if synced.
+                    state = ntp_synced ? S_FETCH : S_NTP_SYNC;
+                    break;
+                }
+            }
+            if (state == S_RECONNECT) {  // soft window exhausted — fall back
+                wifi_retries = 0;
+                state = S_CONNECTING;
+            }
+        } else {
+            wifi_retries = 0;
+            state = S_CONNECTING;
+            delay(2000);
+        }
         break;
+    }
 
     default:
         state = S_CONNECTING;
