@@ -37,6 +37,7 @@
 #include "api_client.h"
 #include "chart_screen.h"
 #include "animations.h"
+#include "settings_screen.h"
 
 // ── Config ────────────────────────────────────────────────────────────────────
 #define LVGL_ROTATION     LV_DISP_ROT_90
@@ -55,7 +56,8 @@ enum State {
     S_FETCH,
     S_CHART,
     S_AFTER_HOURS,
-    S_RECONNECT
+    S_RECONNECT,
+    S_SETTINGS
 };
 
 // ── Reset button state ────────────────────────────────────────────────────────
@@ -285,8 +287,9 @@ void setup() {
 
     // Load settings from NVS
     settings_load(&cfg);
-    Serial.printf("[setup] settings loaded: wifi_ok=%d assets=%d tf=%d\n",
-                  cfg.wifi_ok, cfg.asset_count, cfg.timeframe);
+    Serial.printf("[setup] settings loaded: wifi_ok=%d assets=%d tf=%d brightness=%d\n",
+                  cfg.wifi_ok, cfg.asset_count, cfg.timeframe, cfg.brightness);
+    bsp_display_brightness_set(cfg.brightness);
 
     show_splash();
     Serial.println("[setup] splash shown");
@@ -525,6 +528,12 @@ void loop() {
             break;
         }
 
+        // 3-second hold: open on-device settings menu
+        if (chart_screen_get_settings_req()) {
+            state = S_SETTINGS;
+            break;
+        }
+
         // Auto cycle (disabled when cycle_secs == 0)
         bool do_cycle = (cfg.cycle_secs > 0) && (cfg.asset_count > 1) &&
                         ((millis() - last_cycle_ms) >= (unsigned long)cfg.cycle_secs * 1000UL);
@@ -578,6 +587,12 @@ void loop() {
             break;
         }
 
+        // 3-second hold: open on-device settings menu
+        if (anim_get_settings_req()) {
+            state = S_SETTINGS;
+            break;
+        }
+
         // Auto cycle (disabled when cycle_secs == 0)
         bool do_cycle = (cfg.cycle_secs > 0) && (cfg.asset_count > 1) &&
                         ((millis() - last_cycle_ms) >= (unsigned long)cfg.cycle_secs * 1000UL);
@@ -618,6 +633,61 @@ void loop() {
             wifi_retries = 0;
             state = S_CONNECTING;
             delay(2000);
+        }
+        break;
+    }
+
+    // ── On-device settings menu ───────────────────────────────────────────
+    case S_SETTINGS: {
+        static bool   settings_entered = false;
+        static Settings settings_work;
+
+        if (!settings_entered) {
+            settings_work = cfg;
+            if (LV_LOCK()) {
+                // Load the settings screen on top of whatever is active.
+                // The displaced screen (chart or anim) stays in memory so
+                // Cancel can restore it without a full rebuild.
+                settings_screen_create(&settings_work);
+                LV_UNLOCK();
+            }
+            settings_entered = true;
+        }
+
+        int r = settings_screen_poll();
+
+        if (r == 1) {
+            // User pressed Save — retrieve edited settings, write NVS, restart.
+            // settings_screen_create showed a "Restarting…" overlay before
+            // setting the result, so the user has a visual cue already.
+            settings_screen_get(&settings_work);
+            settings_save(&settings_work);
+            delay(1500);   // let the on-screen message render
+            ESP.restart();
+
+        } else if (r == -1) {
+            // User pressed Cancel — restore the screen that was active before
+            // settings opened, and discard all edits (NVS is untouched).
+            if (LV_LOCK()) {
+                lv_obj_t* ss = settings_screen_detach();
+                queue_scr_for_delete(ss);
+                if (chart_created) {
+                    // Chart screen still exists in memory; bring it back and
+                    // immediately free the queued settings screen.
+                    chart_screen_show();
+                    cleanup_pending_scr();
+                }
+                // If chart_created == false (came from S_AFTER_HOURS), the
+                // settings screen stays queued and will be freed by
+                // cleanup_pending_scr() inside show_connecting() in S_FETCH.
+                LV_UNLOCK();
+            }
+            settings_entered = false;
+            last_fetch_ms   = 0;
+            chart_displaced = false;
+            state = S_FETCH;
+        } else {
+            delay(30);   // yield to the LVGL task while user navigates
         }
         break;
     }

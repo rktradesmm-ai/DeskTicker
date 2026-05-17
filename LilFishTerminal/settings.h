@@ -32,6 +32,7 @@ typedef struct {
     int      cycle_secs;           // 5-120, 0 = manual swipe only
     int      after_anim;           // ANIM_*
     int      tz_offset;            // UTC offset in minutes (e.g. -300 = UTC-5, +330 = UTC+5:30)
+    int      brightness;           // backlight level 10-100 %
 } Settings;
 
 void settings_defaults(Settings* s);

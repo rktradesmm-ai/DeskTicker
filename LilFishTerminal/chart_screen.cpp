@@ -53,17 +53,37 @@ static void get_candle_colors(const Settings* s, lv_color_t* bull, lv_color_t* b
 #define COL_CUR_PX  lv_color_hex(0x58A6FF)
 
 // ── Swipe / gesture state ─────────────────────────────────────────────────────
-static volatile int8_t chart_swipe      = 0;  // horizontal: set by LVGL task
-static volatile int8_t chart_swipe_vert = 0;  // vertical: set by LVGL task
+static volatile int8_t chart_swipe        = 0;  // horizontal: set by LVGL task
+static volatile int8_t chart_swipe_vert   = 0;  // vertical: set by LVGL task
+static volatile int8_t chart_settings_req = 0;  // 1 when triple-tap detected
+
+// Triple-tap tracking: 3 clicks within 1.2 s opens Settings.
+// Uses LV_EVENT_CLICKED (fires only on clean tap, never on swipe).
+static int           chart_tap_count   = 0;
+static unsigned long chart_last_tap_ms = 0;
 
 static void chart_gesture_cb(lv_event_t*) {
     lv_indev_t* indev = lv_indev_get_act();
     if (!indev) return;
+
     lv_dir_t dir = lv_indev_get_gesture_dir(indev);
     if      (dir == LV_DIR_LEFT)   chart_swipe      =  1;  // next asset
     else if (dir == LV_DIR_RIGHT)  chart_swipe      = -1;  // prev asset
     else if (dir == LV_DIR_TOP)    chart_swipe_vert =  1;  // next timeframe
     else if (dir == LV_DIR_BOTTOM) chart_swipe_vert = -1;  // prev timeframe
+    // A swipe cancels any in-progress tap sequence.
+    chart_tap_count = 0;
+}
+
+// Counts clean taps; fires settings_req after 3 within 1.2 s.
+static void chart_tap_cb(lv_event_t*) {
+    unsigned long now = millis();
+    if (now - chart_last_tap_ms > 1200UL) chart_tap_count = 0;
+    chart_last_tap_ms = now;
+    if (++chart_tap_count >= 3) {
+        chart_tap_count    = 0;
+        chart_settings_req = 1;
+    }
 }
 
 int chart_screen_get_swipe() {
@@ -75,6 +95,12 @@ int chart_screen_get_swipe() {
 int chart_screen_get_swipe_vert() {
     int d = (int)chart_swipe_vert;
     chart_swipe_vert = 0;
+    return d;
+}
+
+int chart_screen_get_settings_req() {
+    int d = (int)chart_settings_req;
+    chart_settings_req = 0;
     return d;
 }
 
@@ -480,6 +506,7 @@ void chart_screen_create(const Settings* s) {
     lv_obj_set_style_border_width(hdr, 0, LV_PART_MAIN);
     lv_obj_set_style_pad_all(hdr, 0, LV_PART_MAIN);
     lv_obj_clear_flag(hdr, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(hdr, LV_OBJ_FLAG_CLICKABLE);
 
     // Left flex row: ticker · price  change%  (auto-sizes with ticker width)
     lv_obj_t* left_cont = lv_obj_create(hdr);
@@ -490,6 +517,7 @@ void chart_screen_create(const Settings* s) {
     lv_obj_set_flex_align(left_cont, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_column(left_cont, 2, 0);
     lv_obj_align(left_cont, LV_ALIGN_LEFT_MID, 8, 0);
+    lv_obj_clear_flag(left_cont, LV_OBJ_FLAG_CLICKABLE);
 
     lbl_ticker = lv_label_create(left_cont);
     lv_obj_set_style_text_font(lbl_ticker, &lv_font_montserrat_22, LV_PART_MAIN);
@@ -503,6 +531,7 @@ void chart_screen_create(const Settings* s) {
     lv_obj_set_style_radius(lbl_dot, 0, LV_PART_MAIN);
     lv_obj_set_style_bg_color(lbl_dot, COL_SUBTEXT, LV_PART_MAIN);
     lv_obj_set_style_bg_opa(lbl_dot, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_clear_flag(lbl_dot, LV_OBJ_FLAG_CLICKABLE);
 
     lbl_price = lv_label_create(left_cont);
     lv_obj_set_style_text_font(lbl_price, &lv_font_montserrat_22, LV_PART_MAIN);
@@ -538,6 +567,7 @@ void chart_screen_create(const Settings* s) {
     lv_obj_set_style_border_width(chart_cont, 0, LV_PART_MAIN);
     lv_obj_set_style_pad_all(chart_cont, 0, LV_PART_MAIN);
     lv_obj_clear_flag(chart_cont, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(chart_cont, LV_OBJ_FLAG_CLICKABLE);
 
     // Main chart canvas (left side, full width minus y-axis)
     chart_buf = (lv_color_t*)heap_caps_malloc(CANVAS_W * CANVAS_H * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
@@ -574,6 +604,7 @@ void chart_screen_create(const Settings* s) {
     lv_obj_set_style_border_width(ftr, 0, LV_PART_MAIN);
     lv_obj_set_style_pad_all(ftr, 4, LV_PART_MAIN);
     lv_obj_clear_flag(ftr, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(ftr, LV_OBJ_FLAG_CLICKABLE);
 
     lbl_ohlc = lv_label_create(ftr);
     lv_obj_set_style_text_font(lbl_ohlc, &lv_font_montserrat_12, LV_PART_MAIN);
@@ -586,7 +617,7 @@ void chart_screen_create(const Settings* s) {
     lv_obj_set_style_text_font(lbl_status, &lv_font_montserrat_10, LV_PART_MAIN);
     lv_obj_set_style_text_color(lbl_status, COL_SUBTEXT, LV_PART_MAIN);
     lv_label_set_text(lbl_status, "");
-    lv_obj_align(lbl_status, LV_ALIGN_RIGHT_MID, -24, 0);
+    lv_obj_align(lbl_status, LV_ALIGN_RIGHT_MID, -25, 0);
 
     // WiFi status dot (right side of footer)
     dot_wifi = lv_obj_create(ftr);
@@ -595,8 +626,13 @@ void chart_screen_create(const Settings* s) {
     lv_obj_set_style_bg_color(dot_wifi, COL_WIFI_NO, LV_PART_MAIN);
     lv_obj_set_style_border_width(dot_wifi, 0, LV_PART_MAIN);
     lv_obj_align(dot_wifi, LV_ALIGN_RIGHT_MID, -8, 0);
+    lv_obj_clear_flag(dot_wifi, LV_OBJ_FLAG_CLICKABLE);
 
     lv_obj_add_event_cb(chart_scr, chart_gesture_cb, LV_EVENT_GESTURE, NULL);
+    lv_obj_add_event_cb(chart_scr, chart_tap_cb,    LV_EVENT_CLICKED, NULL);
+    chart_settings_req = 0;
+    chart_tap_count    = 0;
+    chart_last_tap_ms  = 0;
     lv_scr_load(chart_scr);
 }
 

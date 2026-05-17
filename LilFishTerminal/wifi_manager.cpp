@@ -7,6 +7,7 @@
 #include "settings.h"
 #include "assets.h"
 #include "esp_bsp.h"
+#include "tz_options.h"
 
 // ── Captive portal objects ────────────────────────────────────────────────────
 static WebServer server(80);
@@ -206,57 +207,20 @@ static String build_html(Settings* s) {
     html += F("' oninput=\"document.getElementById('cv').textContent=this.value+'s'\">"
               "</div></div>");
 
-    // Timezone
+    // Timezone — options come from the shared TZ_OPTS table in tz_options.h
     html += F("<div class='card'><h2>Timezone</h2>"
               "<select name='tz'>");
-    // Common UTC offsets: label → offset in minutes
-    struct { const char* label; int minutes; } tz_opts[] = {
-        {"UTC-12:00 (Baker Island)",   -720},
-        {"UTC-11:00 (American Samoa)", -660},
-        {"UTC-10:00 (Hawaii)",         -600},
-        {"UTC-09:00 (Alaska)",         -540},
-        {"UTC-08:00 (Pacific US/CA)",  -480},
-        {"UTC-07:00 (Mountain US)",    -420},
-        {"UTC-06:00 (Central US)",     -360},
-        {"UTC-05:00 (Eastern US)",     -300},
-        {"UTC-04:00 (Atlantic / EDT)", -240},
-        {"UTC-03:30 (Newfoundland)",   -210},
-        {"UTC-03:00 (Brazil / ART)",   -180},
-        {"UTC-02:00",                  -120},
-        {"UTC-01:00 (Azores)",          -60},
-        {"UTC+00:00 (London / GMT)",      0},
-        {"UTC+01:00 (Central Europe)",   60},
-        {"UTC+02:00 (Eastern Europe)",  120},
-        {"UTC+03:00 (Moscow / Riyadh)", 180},
-        {"UTC+03:30 (Tehran)",          210},
-        {"UTC+04:00 (Dubai / Baku)",    240},
-        {"UTC+04:30 (Kabul)",           270},
-        {"UTC+05:00 (Pakistan)",        300},
-        {"UTC+05:30 (India / Sri Lanka)",330},
-        {"UTC+05:45 (Nepal)",           345},
-        {"UTC+06:00 (Bangladesh)",      360},
-        {"UTC+06:30 (Myanmar)",         390},
-        {"UTC+07:00 (Bangkok / Jakarta)",420},
-        {"UTC+08:00 (China / SGP / HK)",480},
-        {"UTC+09:00 (Tokyo / Seoul)",   540},
-        {"UTC+09:30 (Adelaide / Darwin)",570},
-        {"UTC+10:00 (Sydney / AEST)",   600},
-        {"UTC+11:00 (Solomon Islands)", 660},
-        {"UTC+12:00 (Auckland / Fiji)", 720},
-        {"UTC+13:00 (Samoa)",           780},
-        {"UTC+14:00 (Line Islands)",    840},
-    };
-    for (int i = 0; i < (int)(sizeof(tz_opts)/sizeof(tz_opts[0])); i++) {
-        html += "<option value='"; html += String(tz_opts[i].minutes); html += "'";
-        if (s->tz_offset == tz_opts[i].minutes) html += " selected";
-        html += ">"; html += tz_opts[i].label; html += "</option>";
+    for (int i = 0; i < TZ_OPTS_N; i++) {
+        html += "<option value='"; html += String(TZ_OPTS[i].minutes); html += "'";
+        if (s->tz_offset == TZ_OPTS[i].minutes) html += " selected";
+        html += ">"; html += TZ_OPTS[i].label; html += "</option>";
     }
     html += F("</select></div>");
 
     // Color theme
     const char* themes[]      = {"0","1","2","3"};
     const char* theme_names[] = {"Classic","Color Shift","Neon Pulse","Custom"};
-    html += F("<div class='card'><h2>Color Theme</h2><div class='theme-row'>");
+    html += F("<div class='card'><h2>Candle Colour</h2><div class='theme-row'>");
     for (int i = 0; i < 4; i++) {
         bool sel = (s->theme == i);
         html += "<input type='radio' name='theme' id='th"; html += themes[i];
@@ -284,7 +248,7 @@ static String build_html(Settings* s) {
     // After-hours animation
     const char* anims[]      = {"0","1","2","3"};
     const char* anim_names[] = {"Aquarium","Beach","Starfield","Countdown"};
-    html += F("<div class='card'><h2>After-Hours Screen</h2><div class='anim-row'>");
+    html += F("<div class='card'><h2>After-Hours Animation</h2><div class='anim-row'>");
     for (int i = 0; i < 4; i++) {
         bool sel = (s->after_anim == i);
         html += "<input type='radio' name='anim' id='an"; html += anims[i];

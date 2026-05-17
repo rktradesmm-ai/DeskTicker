@@ -19,6 +19,7 @@ void settings_defaults(Settings* s) {
     s->cycle_secs       = 30;
     s->after_anim       = ANIM_AQUARIUM;
     s->tz_offset        = 0;
+    s->brightness       = 100;
     s->wifi_ok          = false;
 }
 
@@ -63,8 +64,11 @@ void settings_load(Settings* s) {
     s->bull_rgb   = prefs.getUInt("bull",    0x26A69A);
     s->bear_rgb   = prefs.getUInt("bear",    0xEF5350);
     s->cycle_secs = prefs.getInt("cycle",    30);
-    s->after_anim = prefs.getInt("anim",     ANIM_AQUARIUM);
-    s->tz_offset  = prefs.getInt("tz",       0);
+    s->after_anim  = prefs.getInt("anim",       ANIM_AQUARIUM);
+    s->tz_offset   = prefs.getInt("tz",         0);
+    s->brightness  = prefs.getInt("brightness", 100);
+    if (s->brightness < 10)  s->brightness = 10;
+    if (s->brightness > 100) s->brightness = 100;
     prefs.end();
 }
 
@@ -91,8 +95,9 @@ void settings_save(const Settings* s) {
     prefs.putUInt("bull",    s->bull_rgb);
     prefs.putUInt("bear",    s->bear_rgb);
     prefs.putInt("cycle",  s->cycle_secs);
-    prefs.putInt("anim",   s->after_anim);
-    prefs.putInt("tz",     s->tz_offset);
+    prefs.putInt("anim",       s->after_anim);
+    prefs.putInt("tz",         s->tz_offset);
+    prefs.putInt("brightness", s->brightness);
     prefs.end();
 }
 

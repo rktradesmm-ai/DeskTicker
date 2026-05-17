@@ -54,5 +54,8 @@ int chart_screen_get_swipe();
 // Resets the flag on read — call once per loop iteration.
 int chart_screen_get_swipe_vert();
 
+// Returns 1 if the user held the screen for >3 s (settings long-press). Resets on read.
+int chart_screen_get_settings_req();
+
 // Cleanup.
 void chart_screen_destroy();

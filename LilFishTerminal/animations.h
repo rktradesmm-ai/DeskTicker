@@ -15,3 +15,6 @@ void anim_set_countdown(uint32_t seconds_remaining);
 
 // Returns +1 (swipe left = next), -1 (swipe right = prev), or 0. Resets on read.
 int anim_get_swipe();
+
+// Returns 1 if the user held the after-hours screen for >3 s. Resets on read.
+int anim_get_settings_req();

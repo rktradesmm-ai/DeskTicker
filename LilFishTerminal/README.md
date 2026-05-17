@@ -73,8 +73,8 @@ into your Arduino `libraries` directory.
    - **Assets** — pick up to 6, grouped by class (Crypto / Stocks & ETFs / Commodities / Forex)
    - **Timeframes** — select one or more (15m / 1h / 4h / 1D); swipe up/down on the chart to cycle between them
    - **Timezone** — UTC offset for your location
-   - **Color theme** — Classic, Color Shift, Neon Pulse, or Custom
-   - **After-hours animation** — shown when markets are closed
+   - **Candle Colour** — Classic, Color Shift, Neon Pulse, or Custom
+   - **After-Hours Animation** — shown when markets are closed
    - **Asset cycling** — auto-cycle interval, or manual swipe-only
 5. Tap **Save & Start** — the device restarts and connects automatically.
 
@@ -107,6 +107,10 @@ https://help.yahoo.com/kb/finance-for-web/exchanges-data-providers-yahoo-finance
 | Swipe right | Previous asset |
 | Swipe up | Next timeframe (cycles through your selected timeframes) |
 | Swipe down | Previous timeframe |
+| **Triple-tap** | Open on-device Settings menu |
+
+Triple-tap works from both the chart screen and after-hours animation screens.
+Tap three times within ~1.2 seconds anywhere on the screen.
 
 ---
 
@@ -130,14 +134,16 @@ it fall back to the full "Connecting to WiFi…" screen.
 
 ---
 
-## Color Themes
+## Candle Colour Themes
 
-| Theme | Description |
-|-------|-------------|
-| Classic | TradingView-inspired teal/red |
-| Color Shift | Bull/bear colors slowly cycle through the rainbow |
-| Neon Pulse | Bright neon colors that pulse rhythmically |
-| Custom | Pick your own bull and bear candle colors |
+| Theme | Up candle | Down candle |
+|-------|-----------|-------------|
+| Classic | Teal `#26A69A` | Red `#EF5350` |
+| Color Shift | Cycles through the rainbow (animated) | Opposite hue |
+| Neon Pulse | Neon green (pulsing) | Neon magenta (pulsing) |
+| Custom | Your choice | Your choice |
+
+The **Candle Colour** page in Settings shows a live color swatch for each option so you can see the up/down colors before selecting.
 
 ---
 
@@ -152,6 +158,27 @@ Crypto is always open and never shows an after-hours screen.
 | Beach | Animated beach sunset with waves and twinkling stars |
 | Starfield | Softly twinkling starfield on a dark sky |
 | Countdown | Digital clock counting down to the next NYSE/NASDAQ open (9:30 AM ET) |
+
+---
+
+## On-Device Settings
+
+Triple-tap the chart or after-hours screen to open the **Settings** menu without rebooting.
+
+| Section | What you can change |
+|---------|---------------------|
+| Assets | Which tickers are shown (1–6); grouped by Crypto / Stocks & ETFs / Commodities / Forex |
+| Timeframes | Which intervals are active (15m / 1h / 4h / 1D); swipe cycles through them |
+| Timezone | UTC offset for your location |
+| Candle Colour | Classic, Color Shift, Neon Pulse, or Custom (swatches shown for each option) |
+| After-Hours Animation | Aquarium / Beach / Starfield / Countdown |
+| Asset Cycling | Enable auto-cycle and set the interval (5–120 s); disable for manual swipe only |
+| Brightness | Display brightness 10–100% (adjusts live as you drag) |
+| About / Diagnostics | Free heap, PSRAM, WiFi SSID/RSSI/IP, NTP status, uptime |
+| Re-do WiFi Setup | Wipes credentials and returns to the captive-portal setup screen |
+
+**Save & Restart** — writes all changes to NVS and reboots.  
+**Cancel** — discards changes and returns to the chart with no reboot.
 
 ---
 
@@ -175,6 +202,8 @@ LilFishTerminal/
 ├── api_client.h / .cpp    # Yahoo Finance v8 chart API, 4H aggregation, host fallback
 ├── chart_screen.h / .cpp  # LVGL candlestick chart, header, y-axis, footer
 ├── animations.h / .cpp    # After-hours animations (aquarium, beach, starfield, countdown)
+├── settings_screen.h / .cpp  # On-device settings menu (triple-tap to open)
+├── tz_options.h / .cpp    # Shared 34-entry timezone table (used by setup portal + settings menu)
 ├── CLAUDE.md              # Architecture notes for AI-assisted development
 │
 │  ── Board support files (from JC3248W535EN DEMO_LVGL) ──

@@ -21,6 +21,8 @@ a candlestick chart on a 3.5" 480×320 IPS touchscreen. No cloud backend, no API
 | `chart_screen.h / .cpp` | LVGL chart screen: header, candle canvas, y-axis canvas, footer |
 | `wifi_manager.h / .cpp` | AP captive-portal setup UI (LVGL screen + HTTP web form); asset picker grouped into Crypto / Stocks & ETFs / Commodities / Forex sections |
 | `animations.h / .cpp` | After-hours fullscreen animations: aquarium, beach, starfield, countdown |
+| `settings_screen.h / .cpp` | On-device settings menu: assets, TF, TZ, candle colour, anim, cycling, brightness, diagnostics |
+| `tz_options.h / .cpp` | Shared 34-entry timezone table consumed by both `wifi_manager` and `settings_screen` |
 
 Board support files (`esp_bsp`, `lv_port`, `esp_lcd_*`, `display.h`, `lv_conf.h`) are copied
 from the JC3248W535EN demo and must not be edited.
@@ -45,9 +47,14 @@ S_FETCH → S_CHART (market open)
 
 S_CHART → S_FETCH (refresh interval, swipe, auto-cycle, market close)
         → S_RECONNECT (WiFi lost)
+        → S_SETTINGS (triple-tap)
 
 S_AFTER_HOURS → S_FETCH (re-check every 5 min, swipe, auto-cycle)
               → S_RECONNECT (WiFi lost)
+              → S_SETTINGS (triple-tap)
+
+S_SETTINGS → S_FETCH (cancel — chart_displaced flag restores the chart)
+           → reboot (save)
 
 S_RECONNECT → S_FETCH (soft reconnect succeeded, chart was visible — chart stays on screen)
             → S_NTP_SYNC (soft reconnect succeeded but NTP was never done)
@@ -231,6 +238,60 @@ GPIO 0 (labeled **BOOT** on the board, NOT RST). Held LOW for ≥ 3 seconds in `
 All share `anim_scr` + `anim_canvas` (PSRAM) driven by `lv_timer_create()`.
 Countdown (`ANIM_COUNTDOWN`) is LVGL-widget based (`cd_scr`, no canvas), uses a 1 s timer.
 `anim_stop()` deletes the timer first, then the screen / frees PSRAM.
+
+---
+
+## On-Device Settings Menu
+
+### Triple-Tap Trigger
+
+The AXS15231B touch IC pulses its INT line only on touch *transitions* (down / up), never
+continuously while a finger rests. This means stationary holds produce exactly one PRESSED
+and one RELEASED event — LVGL never sees repeated `LV_EVENT_PRESSING` ticks, so a hold
+timer cannot work. **Two-finger hold is also impossible** — the driver is single-touch only.
+
+Fix: **triple-tap** (3 taps within 1.2 s). Each discrete tap fires a clean down+up interrupt
+pair, registering reliably. A swipe emits `LV_EVENT_GESTURE` (never `LV_EVENT_CLICKED`),
+so swipes can never be mistaken for taps. State tracked in `chart_tap_count` /
+`chart_last_tap_ms` (chart screen) and `anim_tap_count` / `anim_last_tap_ms` (anim screens).
+
+### Click Routing on the Chart Screen
+
+`LV_EVENT_CLICKED` is delivered only to the object the press lands on (`act_obj`) — it does
+**not** bubble. The chart screen is fully covered by container objects (`hdr`, `left_cont`,
+`lbl_dot`, `chart_cont`, `ftr`, `dot_wifi`), which would swallow every tap. Fix: clear
+`LV_OBJ_FLAG_CLICKABLE` on all six containers so hit-testing falls through to `chart_scr`
+where `chart_tap_cb` is registered. Gesture bubbling (`LV_OBJ_FLAG_GESTURE_BUBBLE`) is on by
+default and is unaffected — swipes still reach `chart_scr`.
+
+### S_SETTINGS State
+
+- **Entry:** copy `Settings work = cfg;` then call `settings_screen_create(&work)` under
+  `LV_LOCK()`; use `cleanup_pending_scr()` to delete the prior screen.
+- **Poll loop:** call `settings_screen_poll()` each iteration →
+  `0` = still editing / `1` = save / `-1` = cancel.
+- **Save (1):** `settings_screen_get(&out); settings_save(&out);` display a brief reboot
+  warning, then `ESP.restart()`.
+- **Cancel (-1):** destroy the settings screen, set `last_fetch_ms = 0`,
+  `state = S_FETCH`. The existing `chart_displaced` path at the top of `S_FETCH` rebuilds
+  the chart without a loading screen if it was previously visible.
+
+### Settings Screen API (`settings_screen.h`)
+
+```cpp
+void settings_screen_create(const Settings* work); // builds UI + lv_scr_load; under LV_LOCK
+int  settings_screen_poll();                        // 0 = editing / 1 = save / -1 = cancel
+void settings_screen_get(Settings* out);            // copy edited working copy out
+void settings_screen_destroy();                     // teardown + queue delete; under LV_LOCK
+```
+
+### Candle Colour Page
+
+The theme picker uses **4 custom selectable rows** (not `lv_roller`) so each row can display
+up/down candle color swatches. ColorShift and NeonPulse are animated at runtime but the
+swatches show a fixed representative sample. The `theme_roller` static pointer was removed;
+`ss_work.theme` is written immediately in the tap callback, not on save. Arrays:
+`theme_rows[4]` and `theme_checks[4]` (checkmark labels, hidden/shown on selection).
 
 ---
 

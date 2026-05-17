@@ -6,19 +6,44 @@
 #include "chart_screen.h"  // SCR_W, SCR_H
 
 // ── Swipe / gesture state ─────────────────────────────────────────────────────
-static volatile int8_t anim_swipe = 0;
+static volatile int8_t anim_swipe        = 0;
+static volatile int8_t anim_settings_req = 0;
+
+// Triple-tap tracking: 3 clicks within 1.2 s opens Settings.
+static int           anim_tap_count   = 0;
+static unsigned long anim_last_tap_ms = 0;
 
 static void anim_gesture_cb(lv_event_t*) {
     lv_indev_t* indev = lv_indev_get_act();
     if (!indev) return;
+
     lv_dir_t dir = lv_indev_get_gesture_dir(indev);
     if      (dir == LV_DIR_LEFT)  anim_swipe =  1;
     else if (dir == LV_DIR_RIGHT) anim_swipe = -1;
+    // A swipe cancels any in-progress tap sequence.
+    anim_tap_count = 0;
+}
+
+// Counts clean taps; fires settings_req after 3 within 1.2 s.
+static void anim_tap_cb(lv_event_t*) {
+    unsigned long now = millis();
+    if (now - anim_last_tap_ms > 1200UL) anim_tap_count = 0;
+    anim_last_tap_ms = now;
+    if (++anim_tap_count >= 3) {
+        anim_tap_count    = 0;
+        anim_settings_req = 1;
+    }
 }
 
 int anim_get_swipe() {
     int d = (int)anim_swipe;
     anim_swipe = 0;
+    return d;
+}
+
+int anim_get_settings_req() {
+    int d = (int)anim_settings_req;
+    anim_settings_req = 0;
     return d;
 }
 
@@ -316,6 +341,10 @@ void anim_start(int type, uint32_t secs_to_open) {
     if (type == ANIM_COUNTDOWN) {
         countdown_build();
         lv_obj_add_event_cb(cd_scr, anim_gesture_cb, LV_EVENT_GESTURE, NULL);
+        lv_obj_add_event_cb(cd_scr, anim_tap_cb,    LV_EVENT_CLICKED, NULL);
+        anim_settings_req = 0;
+        anim_tap_count    = 0;
+        anim_last_tap_ms  = 0;
         anim_timer = lv_timer_create(countdown_tick_cb, 1000, nullptr);
         return;
     }
@@ -353,11 +382,17 @@ void anim_start(int type, uint32_t secs_to_open) {
     }
 
     lv_obj_add_event_cb(anim_scr, anim_gesture_cb, LV_EVENT_GESTURE, NULL);
+    lv_obj_add_event_cb(anim_scr, anim_tap_cb,    LV_EVENT_CLICKED, NULL);
+    anim_settings_req = 0;
+    anim_tap_count    = 0;
+    anim_last_tap_ms  = 0;
     lv_scr_load(anim_scr);
 }
 
 void anim_stop() {
-    anim_swipe = 0;
+    anim_swipe        = 0;
+    anim_settings_req = 0;
+    anim_tap_count    = 0;
     if (anim_timer) { lv_timer_del(anim_timer); anim_timer = nullptr; }
 
     if (cur_type == ANIM_COUNTDOWN) {
