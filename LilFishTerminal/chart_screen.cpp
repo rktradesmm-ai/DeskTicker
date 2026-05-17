@@ -91,7 +91,6 @@ static lv_obj_t*    chart_canvas = nullptr;
 static lv_obj_t*    yaxis_canvas = nullptr;
 static lv_obj_t*    xaxis_canvas = nullptr;
 static lv_obj_t*    lbl_ohlc     = nullptr;
-static lv_obj_t*    lbl_vol      = nullptr;
 static lv_color_t*  chart_buf    = nullptr;
 static lv_color_t*  yaxis_buf    = nullptr;
 static lv_color_t*  xaxis_buf    = nullptr;
@@ -115,12 +114,6 @@ static void fmt_price(char* buf, size_t n, float v, int decimals) {
     }
 }
 
-static void fmt_volume(char* buf, size_t n, long vol) {
-    if      (vol >= 1000000000L) snprintf(buf, n, "%.1fB", vol / 1e9);
-    else if (vol >= 1000000L)    snprintf(buf, n, "%.1fM", vol / 1e6);
-    else if (vol >= 1000L)       snprintf(buf, n, "%.0fK", vol / 1e3);
-    else                         snprintf(buf, n, "%ld", vol);
-}
 
 static const char* tf_label(int tf) {
     switch (tf) {
@@ -181,7 +174,7 @@ static void draw_chart_canvas(const AssetData* d, const Settings* s) {
 
     // Box top line and left border (same grey as grid lines)
     ldsc.color = COL_GRID;
-    lv_point_t box_top[2]  = {{0, PLOT_TOP}, {cw - 1, PLOT_TOP}};
+    lv_point_t box_top[2]  = {{0, PLOT_TOP}, {cw, PLOT_TOP}};
     lv_point_t box_left[2] = {{0, PLOT_TOP}, {0, CANVAS_H - 1}};
     lv_canvas_draw_line(chart_canvas, box_top,  2, &ldsc);
     lv_canvas_draw_line(chart_canvas, box_left, 2, &ldsc);
@@ -426,7 +419,7 @@ static void draw_xaxis(const AssetData* d, const Settings* s) {
     ldsc.opa   = LV_OPA_COVER;
 
     // Horizontal axis line across the full width at the top of the label strip
-    lv_point_t axis[2] = {{0, 0}, {CANVAS_W - 1, 0}};
+    lv_point_t axis[2] = {{0, 0}, {CANVAS_W, 0}};
     lv_canvas_draw_line(xaxis_canvas, axis, 2, &ldsc);
 
     lv_draw_label_dsc_t tdsc;
@@ -586,13 +579,7 @@ void chart_screen_create(const Settings* s) {
     lv_obj_set_style_text_font(lbl_ohlc, &lv_font_montserrat_12, LV_PART_MAIN);
     lv_obj_set_style_text_color(lbl_ohlc, COL_SUBTEXT, LV_PART_MAIN);
     lv_label_set_text(lbl_ohlc, "O:-- H:-- L:-- C:--");
-    lv_obj_align(lbl_ohlc, LV_ALIGN_LEFT_MID, 4, -8);
-
-    lbl_vol = lv_label_create(ftr);
-    lv_obj_set_style_text_font(lbl_vol, &lv_font_montserrat_12, LV_PART_MAIN);
-    lv_obj_set_style_text_color(lbl_vol, COL_SUBTEXT, LV_PART_MAIN);
-    lv_label_set_text(lbl_vol, "Vol: --");
-    lv_obj_align(lbl_vol, LV_ALIGN_LEFT_MID, 4, 8);
+    lv_obj_align(lbl_ohlc, LV_ALIGN_LEFT_MID, 4, 0);
 
     // Fetch/error status — shown left of wifi dot during background refresh
     lbl_status = lv_label_create(ftr);
@@ -674,23 +661,18 @@ void chart_screen_update(const AssetData* d, const Settings* s, bool wifi_ok) {
     lv_label_set_text(lbl_change, cbuf);
     lv_obj_set_style_text_color(lbl_change, d->change_pct >= 0 ? COL_POS : COL_NEG, LV_PART_MAIN);
 
-    // OHLC + Volume from last candle
+    // OHLC from last candle
     if (d->candle_count > 0) {
         const Candle* last = &d->candles[d->candle_count - 1];
-        char ob[14], hb[14], lb[14], cb[14], vb[12];
+        char ob[14], hb[14], lb[14], cb[14];
         fmt_price(ob, sizeof(ob), last->open,  dec);
         fmt_price(hb, sizeof(hb), last->high,  dec);
         fmt_price(lb, sizeof(lb), last->low,   dec);
         fmt_price(cb, sizeof(cb), last->close, dec);
-        fmt_volume(vb, sizeof(vb), last->volume);
 
         char ohlc[72];
         snprintf(ohlc, sizeof(ohlc), "O:%s  H:%s  L:%s  C:%s", ob, hb, lb, cb);
         lv_label_set_text(lbl_ohlc, ohlc);
-
-        char vol[20];
-        snprintf(vol, sizeof(vol), "Vol: %s", vb);
-        lv_label_set_text(lbl_vol, vol);
     }
 
     // Decide whether to do a full redraw or just update the last candle + price.
@@ -735,5 +717,5 @@ void chart_screen_destroy() {
     if (xaxis_buf)  { heap_caps_free(xaxis_buf);  xaxis_buf  = nullptr; }
     chart_canvas = yaxis_canvas = xaxis_canvas = nullptr;
     lbl_ticker = lbl_price = lbl_change = lbl_tf = lbl_date_time = lbl_status = dot_wifi = nullptr;
-    lbl_ohlc   = lbl_vol   = nullptr;
+    lbl_ohlc = nullptr;
 }
