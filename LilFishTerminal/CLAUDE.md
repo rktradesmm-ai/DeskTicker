@@ -37,11 +37,17 @@ a candlestick chart on a 3.5" 480×320 IPS touchscreen. No cloud backend, no API
 | `tz_options.h / .cpp` | Shared 34-entry timezone table consumed by both `wifi_manager` and `settings_screen` |
 
 Board support files (`esp_bsp`, `lv_port`, `esp_lcd_*`, `display.h`, `lv_conf.h`) are copied
-from the JC3248W535EN demo and must not be edited. Both are at stock vendor settings
-(`portMAX_DELAY` waits). An earlier experiment replaced those waits with bounded
-`pdMS_TO_TICKS(100/250)` values; that was reverted because the bounded timeouts were the
-actual cause of the hang — they broke QSPI/DMA serialization, allowing a new transfer to be
-queued before the previous one completed, silently wedging the SPI driver's internal queue.
+from the JC3248W535EN demo. **Do not edit them except for the two deliberate changes below.**
+
+**Deliberate change — `lv_port.c` line ~242:** `disp_drv.full_refresh = 0` (was `1`).
+Enables partial refresh so LVGL only flushes the changed dirty region each frame, reducing
+sustained QSPI DMA load that causes the silent-deadlock hang.
+
+**Do not change the semaphore waits.** Both `trans_done_sem` wait (`lv_port.c`) and
+`te_v_sync_sem` wait (`esp_bsp.c`) are at stock `portMAX_DELAY`. An earlier experiment
+replaced these with bounded `pdMS_TO_TICKS(100/250)` values; that was reverted because the
+bounded timeouts broke QSPI/DMA serialization, allowing a new transfer to be queued before
+the previous one completed, silently wedging the SPI driver's internal queue.
 
 ---
 
