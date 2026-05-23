@@ -238,10 +238,11 @@ lv_disp_t *lvgl_port_add_disp(const lvgl_port_display_cfg_t *disp_cfg)
 
     disp_ctx->disp_drv.draw_buf = disp_buf;
     disp_ctx->disp_drv.user_data = disp_ctx;
-    /* Partial refresh: LVGL tracks the dirty region and only flushes changed
-       pixels. Reduces sustained QSPI DMA load that causes the silent deadlock.
-       The AXS15231B handles partial-area writes correctly via its flush_cb. */
-    disp_ctx->disp_drv.full_refresh = 0;
+    /* Must stay 1. full_refresh = 0 (partial) is INCOMPATIBLE with this board:
+       the flush callback performs a software 90° coordinate rotation that only
+       works for full-screen writes. Partial-area coordinates are mis-mapped,
+       causing garbled/overlapping display output. Do not change. */
+    disp_ctx->disp_drv.full_refresh = 1;
 
 #if LVGL_PORT_HANDLE_FLUSH_READY
     /* Register done callback */

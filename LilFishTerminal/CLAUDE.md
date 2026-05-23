@@ -37,11 +37,15 @@ a candlestick chart on a 3.5" 480×320 IPS touchscreen. No cloud backend, no API
 | `tz_options.h / .cpp` | Shared 34-entry timezone table consumed by both `wifi_manager` and `settings_screen` |
 
 Board support files (`esp_bsp`, `lv_port`, `esp_lcd_*`, `display.h`, `lv_conf.h`) are copied
-from the JC3248W535EN demo. **Do not edit them except for the two deliberate changes below.**
+from the JC3248W535EN demo and must not be edited. Both vendor waits are at stock settings.
 
-**Deliberate change — `lv_port.c` line ~242:** `disp_drv.full_refresh = 0` (was `1`).
-Enables partial refresh so LVGL only flushes the changed dirty region each frame, reducing
-sustained QSPI DMA load that causes the silent-deadlock hang.
+**PERMANENT INCOMPATIBILITY — `full_refresh` must stay `1` in `lv_port.c`.**
+`full_refresh = 0` (partial refresh) was tested and immediately caused severe garbled display
+output: diagonal colour stripes on the settings page and double/overlapping frames on the chart.
+Root cause: the flush callback performs a software 90° coordinate rotation that was written for
+full-screen writes only. Partial-area `(x1,y1)→(x2,y2)` coordinates are mis-mapped through
+the rotation, landing in the wrong physical display region. Do not attempt partial refresh again
+without first rewriting the flush callback's rotation to handle sub-screen areas.
 
 **Do not change the semaphore waits.** Both `trans_done_sem` wait (`lv_port.c`) and
 `te_v_sync_sem` wait (`esp_bsp.c`) are at stock `portMAX_DELAY`. An earlier experiment
