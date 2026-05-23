@@ -1,5 +1,17 @@
 # Lil Fish Terminal — Claude Context
 
+## Required Toolchain
+
+**ESP32 Arduino core: 3.0.7** (Boards Manager → "esp32 by Espressif" → 3.0.7)
+
+- Do **NOT** upgrade to 3.1.0 or later — introduces a display deadlock regression
+  that hangs the aquarium/beach/starfield animations in ~40 min.
+- Do **NOT** downgrade to 3.0.2 — HTTP client bug causes `YF: IncompleteInput`
+  errors on Yahoo Finance responses.
+- 3.0.7 is the bisect-tested sweet spot: hang window extends to 2–9 h (vs 30–45 min
+  on 3.3.8), and HTTP works correctly.
+- See `BISECT_LOG.md` for the full bisect history and test results.
+
 ## Project Overview
 
 ESP32-S3 desk trading terminal. Fetches live OHLCV candle data from Yahoo Finance and renders
@@ -25,7 +37,11 @@ a candlestick chart on a 3.5" 480×320 IPS touchscreen. No cloud backend, no API
 | `tz_options.h / .cpp` | Shared 34-entry timezone table consumed by both `wifi_manager` and `settings_screen` |
 
 Board support files (`esp_bsp`, `lv_port`, `esp_lcd_*`, `display.h`, `lv_conf.h`) are copied
-from the JC3248W535EN demo and must not be edited.
+from the JC3248W535EN demo and must not be edited. Both are at stock vendor settings
+(`portMAX_DELAY` waits). An earlier experiment replaced those waits with bounded
+`pdMS_TO_TICKS(100/250)` values; that was reverted because the bounded timeouts were the
+actual cause of the hang — they broke QSPI/DMA serialization, allowing a new transfer to be
+queued before the previous one completed, silently wedging the SPI driver's internal queue.
 
 ---
 

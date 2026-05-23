@@ -39,7 +39,13 @@ In Arduino IDE → Preferences → Additional Boards Manager URLs, add:
 ```
 https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
 ```
-Install **esp32 by Espressif Systems v3.3.8**. Tested on v3.3.8; earlier 3.0.x cores also work but are no longer the recommended baseline.
+Install **esp32 by Espressif Systems v3.0.7**.
+
+> **Important — use exactly v3.0.7.**
+> - v3.1.0 and later introduce a display deadlock that hangs the after-hours animations in ~40 minutes.
+> - v3.0.2 and earlier have an HTTP client bug that truncates Yahoo Finance responses.
+> - v3.0.7 is the tested stable version: longest hang-free window and correct HTTP behaviour.
+> - See `LilFishTerminal/BISECT_LOG.md` for the full version-bisect history.
 
 > **Note:** The JC3248W535EN "Must see for use.txt" board-file swap applies only to the vendor MJPEG demo and is **not** needed for this project — use the stock **ESP32S3 Dev Module** board as listed in the table above.
 
@@ -154,9 +160,9 @@ Crypto is always open and never shows an after-hours screen.
 
 | Animation | Description |
 |-----------|-------------|
-| Aquarium | Pixel fish swimming across a deep-blue ocean |
-| Beach | Animated beach sunset with waves and twinkling stars |
-| Starfield | Softly twinkling starfield on a dark sky |
+| Aquarium | Fish of mixed sizes drifting over a deep-blue ocean floor with gravel |
+| Sunset Beach | Animated beach sunset with a soft horizon and gentle waves |
+| Starry Sky | Softly twinkling stars on a dark sky with an occasional shooting star |
 | Countdown | Digital clock counting down to the next NYSE/NASDAQ open (9:30 AM ET) |
 
 ---
@@ -171,7 +177,7 @@ Triple-tap the chart or after-hours screen to open the **Settings** menu without
 | Timeframes | Which intervals are active (15m / 1h / 4h / 1D); swipe cycles through them |
 | Timezone | UTC offset for your location |
 | Candle Colour | Classic, Color Shift, Neon Pulse, or Custom (swatches shown for each option) |
-| After-Hours Animation | Aquarium / Beach / Starfield / Countdown |
+| After-Hours Animation | Aquarium / Sunset Beach / Starry Sky / Countdown |
 | Asset Cycling | Enable auto-cycle and set the interval (5–120 s); disable for manual swipe only |
 | Brightness | Display brightness 10–100% (adjusts live as you drag) |
 | About / Diagnostics | Free heap, PSRAM, WiFi SSID/RSSI/IP, NTP status, uptime |
