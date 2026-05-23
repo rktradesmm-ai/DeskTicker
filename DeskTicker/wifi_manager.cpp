@@ -29,11 +29,6 @@ static void build_setup_screen() {
     lv_label_set_text(title, "DeskTicker Setup");
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 24);
 
-    lv_obj_t* fish = lv_label_create(setup_scr);
-    lv_obj_set_style_text_font(fish, &lv_font_montserrat_40, LV_PART_MAIN);
-    lv_label_set_text(fish, "><>");
-    lv_obj_align(fish, LV_ALIGN_CENTER, 0, -20);
-
     lv_obj_t* inst1 = lv_label_create(setup_scr);
     lv_obj_set_style_text_font(inst1, &lv_font_montserrat_16, LV_PART_MAIN);
     lv_obj_set_style_text_color(inst1, lv_color_hex(0xCDD9E5), LV_PART_MAIN);

@@ -1,11 +1,11 @@
-# Lil Fish Terminal — Claude Context
+# DeskTicker — Claude Context
 
 ## Required Toolchain
 
 **ESP32 Arduino core: 3.0.7** (Boards Manager → "esp32 by Espressif" → 3.0.7)
 
 - Do **NOT** upgrade to 3.1.0 or later — introduces a display deadlock regression
-  that hangs the aquarium/beach/starfield animations in ~40 min.
+  that hangs the tidepool/coral reef/starfield animations in ~40 min.
 - Do **NOT** downgrade to 3.0.2 — HTTP client bug causes `YF: IncompleteInput`
   errors on Yahoo Finance responses.
 - 3.0.7 is the bisect-tested sweet spot: hang window extends to 2–9 h (vs 30–45 min
@@ -26,13 +26,13 @@ a candlestick chart on a 3.5" 480×320 IPS touchscreen. No cloud backend, no API
 
 | File | Responsibility |
 |------|---------------|
-| `LilFishTerminal.ino` | Main state machine, WiFi/NTP lifecycle, loop orchestration |
+| `DeskTicker.ino` | Main state machine, WiFi/NTP lifecycle, loop orchestration |
 | `assets.h` | `AssetDef` / `AssetData` / `Candle` structs; `ASSETS[]` table (24 assets); `asset_find()` |
 | `settings.h / .cpp` | `Settings` struct; NVS load/save via Arduino `Preferences` |
 | `api_client.h / .cpp` | Yahoo Finance v8 chart API fetch; 4H aggregation; host fallback |
 | `chart_screen.h / .cpp` | LVGL chart screen: header, candle canvas, y-axis canvas, footer |
 | `wifi_manager.h / .cpp` | AP captive-portal setup UI (LVGL screen + HTTP web form); asset picker grouped into Crypto / Stocks & ETFs / Commodities / Forex sections |
-| `animations.h / .cpp` | After-hours fullscreen animations: aquarium, beach, starfield, countdown |
+| `animations.h / .cpp` | After-hours fullscreen animations: tidepool, coral reef, starfield, countdown |
 | `settings_screen.h / .cpp` | On-device settings menu: assets, TF, TZ, candle colour, anim, cycling, brightness, diagnostics |
 | `tz_options.h / .cpp` | Shared 34-entry timezone table consumed by both `wifi_manager` and `settings_screen` |
 
@@ -55,7 +55,7 @@ the previous one completed, silently wedging the SPI driver's internal queue.
 
 ---
 
-## State Machine (`LilFishTerminal.ino`)
+## State Machine (`DeskTicker.ino`)
 
 ```
 S_INIT → S_WIFI_SETUP (first boot, no saved WiFi)
@@ -220,7 +220,7 @@ Refresh intervals: 15m=30s, 1H=30s, 4H=30s, 1D=600s.
 
 ## Settings (`settings.h / .cpp`)
 
-Stored in NVS namespace `"lilfish"` via `Preferences`. Key names:
+Stored in NVS namespace `"lilfish"` via `Preferences`. **Do not rename this namespace** — changing it would silently wipe all saved user settings (WiFi credentials, assets, theme, etc.) on the next flash. The name is intentionally kept from the original firmware even after the DeskTicker brand rename. Key names:
 
 | Key | Type | Meaning |
 |-----|------|---------|
@@ -261,9 +261,23 @@ GPIO 0 (labeled **BOOT** on the board, NOT RST). Held LOW for ≥ 3 seconds in `
 
 ## After-Hours Animations
 
-All share `anim_scr` + `anim_canvas` (PSRAM) driven by `lv_timer_create()`.
-Countdown (`ANIM_COUNTDOWN`) is LVGL-widget based (`cd_scr`, no canvas), uses a 1 s timer.
-`anim_stop()` deletes the timer first, then the screen / frees PSRAM.
+Four scenes: **Tidepool** (rocky shore, dusk sky, pixel crab walk), **Coral Reef** (underwater
+parallax, tropical fish, pixel crab), **Starfield** (slow star drift), **Countdown** (digital
+clock to NYSE open, crab walk, digit color shifts Pearl→Amber→Green in final 30/5 min).
+
+All scenes share `anim_scr` + `anim_canvas` (PSRAM) driven by `lv_timer_create()` at 120 ms.
+Countdown (`ANIM_COUNTDOWN`) additionally uses `cd_crab_canvas` (480×50 PSRAM strip) + a
+separate `cd_crab_timer` at 120 ms for the crab walk layer.
+`anim_stop()` deletes all timers first, then the screen(s) / frees PSRAM buffers.
+
+Crab claw colors follow `s_anim_bull` / `s_anim_bear` globals (set via `anim_set_candle_colors()`
+before `anim_start()`). The main loop calls `anim_set_candle_colors(cfg.bull_rgb, cfg.bear_rgb)`
+each time it enters `S_AFTER_HOURS`.
+
+**After-hours poll interval:** `S_AFTER_HOURS` re-checks market hours every **5 minutes**
+(`300000UL` ms). Each re-check calls `anim_stop()` → `S_FETCH` → `anim_start()`, which also
+resets the 30-second hardware watchdog. The animation never runs continuously for more than
+~5 minutes. A true long-duration soak test requires temporarily extending this interval.
 
 ---
 

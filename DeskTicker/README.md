@@ -1,4 +1,4 @@
-# Lil Fish Trading Terminal
+# DeskTicker
 
 Live candlestick chart terminal for your desk. WiFi-connected, no subscriptions, no API key.
 
@@ -45,7 +45,7 @@ Install **esp32 by Espressif Systems v3.0.7**.
 > - v3.1.0 and later introduce a display deadlock that hangs the after-hours animations in ~40 minutes.
 > - v3.0.2 and earlier have an HTTP client bug that truncates Yahoo Finance responses.
 > - v3.0.7 is the tested stable version: longest hang-free window and correct HTTP behaviour.
-> - See `LilFishTerminal/BISECT_LOG.md` for the full version-bisect history.
+> - See `DeskTicker/BISECT_LOG.md` for the full version-bisect history.
 
 > **Note:** The JC3248W535EN "Must see for use.txt" board-file swap applies only to the vendor MJPEG demo and is **not** needed for this project — use the stock **ESP32S3 Dev Module** board as listed in the table above.
 
@@ -160,10 +160,10 @@ Crypto is always open and never shows an after-hours screen.
 
 | Animation | Description |
 |-----------|-------------|
-| Aquarium | Fish of mixed sizes drifting over a deep-blue ocean floor with gravel |
-| Sunset Beach | Animated beach sunset with a soft horizon and gentle waves |
-| Starry Sky | Softly twinkling stars on a dark sky with an occasional shooting star |
-| Countdown | Digital clock counting down to the next NYSE/NASDAQ open (9:30 AM ET) |
+| Tidepool | Rocky shore with dusk sky, rising bubbles, and a pixel crab that walks back and forth. Claw colors match your bull/bear candle theme. |
+| Coral Reef | Underwater reef with parallax depth layers, tropical fish, rising bubbles, and a walking pixel crab. Claw colors match your bull/bear theme. |
+| Starfield | Slow starfield drift — minimal and calm. |
+| Countdown | Digital clock counting down to the next NYSE/NASDAQ open (9:30 AM ET). Crab walks along the bottom; digit color shifts from white to amber to green as open time approaches. |
 
 ---
 
@@ -177,7 +177,7 @@ Triple-tap the chart or after-hours screen to open the **Settings** menu without
 | Timeframes | Which intervals are active (15m / 1h / 4h / 1D); swipe cycles through them |
 | Timezone | UTC offset for your location |
 | Candle Colour | Classic, Color Shift, Neon Pulse, or Custom (swatches shown for each option) |
-| After-Hours Animation | Aquarium / Sunset Beach / Starry Sky / Countdown |
+| After-Hours Animation | Tidepool / Coral Reef / Starfield / Countdown |
 | Asset Cycling | Enable auto-cycle and set the interval (5–120 s); disable for manual swipe only |
 | Brightness | Display brightness 10–100% (adjusts live as you drag) |
 | About / Diagnostics | Free heap, PSRAM, WiFi SSID/RSSI/IP, NTP status, uptime |
