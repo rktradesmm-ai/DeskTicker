@@ -14,8 +14,8 @@ void settings_defaults(Settings* s) {
     s->timeframes[0]    = TF_1H;
     s->timeframe_count  = 1;
     s->theme            = THEME_CLASSIC;
-    s->bull_rgb         = 0x26A69A;
-    s->bear_rgb         = 0xEF5350;
+    s->bull_rgb         = 0x26A69A;   // Classic teal
+    s->bear_rgb         = 0xEF5350;   // Classic red
     s->cycle_secs       = 30;
     s->after_anim       = ANIM_AQUARIUM;
     s->tz_offset        = 0;
@@ -61,8 +61,8 @@ void settings_load(Settings* s) {
         if (!found) s->timeframe = s->timeframes[0];
     }
     s->theme      = prefs.getInt("theme",    THEME_CLASSIC);
-    s->bull_rgb   = prefs.getUInt("bull",    0x26A69A);
-    s->bear_rgb   = prefs.getUInt("bear",    0xEF5350);
+    s->bull_rgb   = prefs.getUInt("bull",    0x26A69A);   // Classic teal default
+    s->bear_rgb   = prefs.getUInt("bear",    0xEF5350);   // Classic red default
     s->cycle_secs = prefs.getInt("cycle",    30);
     s->after_anim  = prefs.getInt("anim",       ANIM_AQUARIUM);
     s->tz_offset   = prefs.getInt("tz",         0);

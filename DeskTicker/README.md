@@ -63,7 +63,7 @@ into your Arduino `libraries` directory.
 
 ### 4. Open and Flash
 
-1. Open `LilFishTerminal/LilFishTerminal.ino` in Arduino IDE.
+1. Open `DeskTicker/DeskTicker.ino` in Arduino IDE.
 2. All board support files (`esp_bsp.c`, `lv_port.c`, etc.) are already in the sketch folder.
 3. Select your COM port and click Upload.
 
@@ -71,8 +71,8 @@ into your Arduino `libraries` directory.
 
 ## First-Time Setup
 
-1. Power on the device. It shows the **Lil Fish Setup** screen.
-2. On your phone or laptop, connect to WiFi: **`LilFish-Setup`**
+1. Power on the device. It shows the **DeskTicker Setup** screen.
+2. On your phone or laptop, connect to WiFi: **`DeskTicker-Setup`**
 3. Open a browser and go to **`192.168.4.1`** (captive portal may open automatically).
 4. Configure:
    - **WiFi** — your network name and password
@@ -200,14 +200,14 @@ not the RST/Reset button. All saved settings are wiped and the device restarts i
 ## Folder Structure
 
 ```
-LilFishTerminal/
-├── LilFishTerminal.ino    # Main sketch & state machine
+DeskTicker/
+├── DeskTicker.ino         # Main sketch & state machine
 ├── assets.h               # Ticker definitions, candle & data structs
 ├── settings.h / .cpp      # NVS preferences (WiFi, assets, timeframes, timezone, theme)
 ├── wifi_manager.h / .cpp  # Captive-portal setup UI + web form handler
 ├── api_client.h / .cpp    # Yahoo Finance v8 chart API, 4H aggregation, host fallback
 ├── chart_screen.h / .cpp  # LVGL candlestick chart, header, y-axis, footer
-├── animations.h / .cpp    # After-hours animations (aquarium, beach, starfield, countdown)
+├── animations.h / .cpp    # After-hours animations (tidepool, reef, starfield, countdown)
 ├── settings_screen.h / .cpp  # On-device settings menu (triple-tap to open)
 ├── tz_options.h / .cpp    # Shared 34-entry timezone table (used by setup portal + settings menu)
 ├── CLAUDE.md              # Architecture notes for AI-assisted development

@@ -1,5 +1,5 @@
 /*
- * Lil Fish Trading Terminal
+ * DeskTicker
  * ──────────────────────────────────────────────────────────────────────────────
  * Hardware: JC3248W535C_I_Y (ESP32-S3, 3.5" 320×480 IPS QSPI, AXS15231B)
  *
@@ -122,25 +122,19 @@ static void show_splash() {
     if (!LV_LOCK()) return;
 
     lv_obj_t* scr = lv_obj_create(NULL);
-    lv_obj_set_style_bg_color(scr, lv_color_hex(0x0D1117), LV_PART_MAIN);
-
-    lv_obj_t* fish = lv_label_create(scr);
-    lv_obj_set_style_text_font(fish, &lv_font_montserrat_40, LV_PART_MAIN);
-    lv_obj_set_style_text_color(fish, lv_color_hex(0x58A6FF), LV_PART_MAIN);
-    lv_label_set_text(fish, "><>");
-    lv_obj_align(fish, LV_ALIGN_CENTER, 0, -24);
+    lv_obj_set_style_bg_color(scr, lv_color_hex(0x0E1117), LV_PART_MAIN);
 
     lv_obj_t* name = lv_label_create(scr);
-    lv_obj_set_style_text_font(name, &lv_font_montserrat_20, LV_PART_MAIN);
-    lv_obj_set_style_text_color(name, lv_color_hex(0xCDD9E5), LV_PART_MAIN);
-    lv_label_set_text(name, "Lil Fish Terminal");
-    lv_obj_align(name, LV_ALIGN_CENTER, 0, 20);
+    lv_obj_set_style_text_font(name, &lv_font_montserrat_28, LV_PART_MAIN);
+    lv_obj_set_style_text_color(name, lv_color_hex(0xE6E9EF), LV_PART_MAIN);
+    lv_label_set_text(name, "DeskTicker");
+    lv_obj_align(name, LV_ALIGN_CENTER, 0, -10);
 
     lv_obj_t* sub = lv_label_create(scr);
     lv_obj_set_style_text_font(sub, &lv_font_montserrat_14, LV_PART_MAIN);
-    lv_obj_set_style_text_color(sub, lv_color_hex(0x58A6FF), LV_PART_MAIN);
-    lv_label_set_text(sub, "Live Prices on Your Desk");
-    lv_obj_align(sub, LV_ALIGN_CENTER, 0, 50);
+    lv_obj_set_style_text_color(sub, lv_color_hex(0x7A8290), LV_PART_MAIN);
+    lv_label_set_text(sub, "The market, on your desk.");
+    lv_obj_align(sub, LV_ALIGN_CENTER, 0, 26);
 
     lv_scr_load(scr);
     // Queue splash for deletion — it will be freed after the next screen loads.
@@ -158,10 +152,10 @@ static void show_connecting(const char* msg) {
     if (!LV_LOCK()) return;
     if (!conn_scr) {
         conn_scr = lv_obj_create(NULL);
-        lv_obj_set_style_bg_color(conn_scr, lv_color_hex(0x0D1117), LV_PART_MAIN);
+        lv_obj_set_style_bg_color(conn_scr, lv_color_hex(0x0E1117), LV_PART_MAIN);
         conn_lbl = lv_label_create(conn_scr);
         lv_obj_set_style_text_font(conn_lbl, &lv_font_montserrat_16, LV_PART_MAIN);
-        lv_obj_set_style_text_color(conn_lbl, lv_color_hex(0x58A6FF), LV_PART_MAIN);
+        lv_obj_set_style_text_color(conn_lbl, lv_color_hex(0xE6E9EF), LV_PART_MAIN);
         lv_obj_align(conn_lbl, LV_ALIGN_CENTER, 0, 0);
         // If the chart was built and visible, loading conn_scr over it displaces
         // it — remember this so we can call chart_screen_show() after the fetch.
@@ -261,7 +255,7 @@ static void show_error(const char* msg) {
     lv_obj_t* scr = lv_scr_act();
     lv_obj_t* lbl = lv_label_create(scr);
     lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, LV_PART_MAIN);
-    lv_obj_set_style_text_color(lbl, lv_color_hex(0xEF5350), LV_PART_MAIN);
+    lv_obj_set_style_text_color(lbl, lv_color_hex(0xEF4444), LV_PART_MAIN);
     lv_label_set_text(lbl, msg);
     lv_obj_align(lbl, LV_ALIGN_BOTTOM_MID, 0, -20);
     LV_UNLOCK();
@@ -270,7 +264,7 @@ static void show_error(const char* msg) {
 // ── Setup ─────────────────────────────────────────────────────────────────────
 void setup() {
     Serial.begin(115200);
-    Serial.println("Lil Fish Terminal booting...");
+    Serial.println("DeskTicker booting...");
 
     // Init display
     bsp_display_cfg_t disp_cfg = {
@@ -438,6 +432,7 @@ void loop() {
             uint32_t cd = secs_to_market_open();
             if (LV_LOCK()) {
                 lv_obj_t* act_before = lv_scr_act();
+                anim_set_candle_colors(cfg.bull_rgb, cfg.bear_rgb);
                 anim_start(cfg.after_anim, cd);   // loads anim/countdown screen -> now active
                 // Destroy the chart only once it is no longer the active screen.
                 // Guard against the rare case where anim_start failed to load

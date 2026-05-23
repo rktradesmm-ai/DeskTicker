@@ -1,4 +1,4 @@
-// On-device settings menu for Lil Fish Terminal.
+// On-device settings menu for DeskTicker.
 // Opened by holding the touchscreen for 3+ seconds from the chart or
 // after-hours screen. Edits a working copy of Settings; only writes to
 // NVS on Save (followed by ESP.restart()).
@@ -15,16 +15,16 @@
 #include "display.h"        // bsp_display_brightness_set
 
 // ── Color constants (match chart_screen dark theme) ───────────────────────────
-#define SS_BG       lv_color_hex(0x131722)
+#define SS_BG       lv_color_hex(0x0E1117)   // Deep Space
 #define SS_HDR      lv_color_hex(0x1E222D)
-#define SS_TEXT     lv_color_hex(0xD1D4DC)
-#define SS_SUBTEXT  lv_color_hex(0x787B86)
+#define SS_TEXT     lv_color_hex(0xE6E9EF)   // Pearl
+#define SS_SUBTEXT  lv_color_hex(0x7A8290)   // Tide Gray
 #define SS_DIVIDER  lv_color_hex(0x2A2E39)
-#define SS_GREEN    lv_color_hex(0x26A69A)
-#define SS_RED      lv_color_hex(0xEF5350)
-#define SS_AMBER    lv_color_hex(0xF59E0B)
-#define SS_BLUE     lv_color_hex(0x58A6FF)
-#define SS_ROW_SEL  lv_color_hex(0x1E2533)  // pressed/selected row highlight
+#define SS_GREEN    lv_color_hex(0x22C55E)   // Bull Green
+#define SS_RED      lv_color_hex(0xEF4444)   // Bear Red
+#define SS_AMBER    lv_color_hex(0xF59E0B)   // Sand Amber
+#define SS_BLUE     lv_color_hex(0x22C55E)   // Bull Green (replaces blue as active accent)
+#define SS_ROW_SEL  lv_color_hex(0x1E2533)   // pressed/selected row highlight
 
 // ── Layout ────────────────────────────────────────────────────────────────────
 #define HDR_H   44
@@ -281,7 +281,7 @@ static void update_main_theme_label() {
 
 static void update_main_anim_label() {
     if (!main_val_anim) return;
-    const char* names[] = {"Aquarium", "Beach", "Starfield", "Countdown"};
+    const char* names[] = {"Tidepool", "Coral Reef", "Starfield", "Countdown"};
     int a = ss_work.after_anim;
     if (a < 0 || a > 3) a = 0;
     lv_label_set_text(main_val_anim, names[a]);
@@ -503,7 +503,7 @@ static void save_cb(lv_event_t*) {
     lv_obj_t* overlay = lv_obj_create(ss_scr);
     lv_obj_set_size(overlay, SCR_W, SCR_H);
     lv_obj_set_pos(overlay, 0, 0);
-    lv_obj_set_style_bg_color(overlay, lv_color_hex(0x0D1117), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(overlay, lv_color_hex(0x0E1117), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(overlay,   LV_OPA_COVER,           LV_PART_MAIN);
     lv_obj_set_style_border_width(overlay, 0, LV_PART_MAIN);
     lv_obj_set_style_radius(overlay,   0,    LV_PART_MAIN);
@@ -511,7 +511,7 @@ static void save_cb(lv_event_t*) {
 
     lv_obj_t* msg = lv_label_create(overlay);
     lv_obj_set_style_text_font(msg,  &lv_font_montserrat_16, LV_PART_MAIN);
-    lv_obj_set_style_text_color(msg, lv_color_hex(0x58A6FF), LV_PART_MAIN);
+    lv_obj_set_style_text_color(msg, lv_color_hex(0xE6E9EF), LV_PART_MAIN);
     lv_obj_set_style_text_align(msg, LV_TEXT_ALIGN_CENTER,   LV_PART_MAIN);
     lv_label_set_text(msg, "Saving settings...\nDevice will restart.");
     lv_obj_align(msg, LV_ALIGN_CENTER, 0, 0);
@@ -846,7 +846,7 @@ static void build_anim_page() {
 
     anim_roller = lv_roller_create(page_anim);
     lv_roller_set_options(anim_roller,
-        "Aquarium\nBeach\nStarfield\nCountdown",
+        "Tidepool\nCoral Reef\nStarfield\nCountdown",
         LV_ROLLER_MODE_NORMAL);
     lv_roller_set_visible_row_count(anim_roller, 4);
     lv_obj_set_size(anim_roller, LV_PCT(100), CONT_H - 20);

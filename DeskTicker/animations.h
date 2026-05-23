@@ -18,3 +18,7 @@ int anim_get_swipe();
 
 // Returns 1 if the user held the after-hours screen for >3 s. Resets on read.
 int anim_get_settings_req();
+
+// Sets the crab claw colors to match the user's bull/bear candle theme.
+// Call before anim_start() whenever the theme changes.
+void anim_set_candle_colors(uint32_t bull_rgb, uint32_t bear_rgb);

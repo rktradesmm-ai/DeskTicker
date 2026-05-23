@@ -39,18 +39,18 @@ static void get_candle_colors(const Settings* s, lv_color_t* bull, lv_color_t* b
 }
 
 // ── Theme colors ──────────────────────────────────────────────────────────────
-#define COL_BG      lv_color_hex(0x131722)
+#define COL_BG      lv_color_hex(0x0E1117)   // Deep Space
 #define COL_HDR     lv_color_hex(0x1E222D)
 #define COL_FTR     lv_color_hex(0x1E222D)
-#define COL_TEXT    lv_color_hex(0xD1D4DC)
-#define COL_SUBTEXT lv_color_hex(0x787B86)
+#define COL_TEXT    lv_color_hex(0xE6E9EF)   // Pearl
+#define COL_SUBTEXT lv_color_hex(0x7A8290)   // Tide Gray
 #define COL_GRID    lv_color_hex(0x2A2E39)
 #define COL_WICK    lv_color_hex(0x5D6073)
-#define COL_POS     lv_color_hex(0x26A69A)
-#define COL_NEG     lv_color_hex(0xEF5350)
-#define COL_WIFI_OK lv_color_hex(0x3FB950)
-#define COL_WIFI_NO lv_color_hex(0xEF5350)
-#define COL_CUR_PX  lv_color_hex(0x58A6FF)
+#define COL_POS     lv_color_hex(0x26A69A)   // Classic teal bull
+#define COL_NEG     lv_color_hex(0xEF5350)   // Classic red bear
+#define COL_WIFI_OK lv_color_hex(0x22C55E)   // Bull Green (wifi status)
+#define COL_WIFI_NO lv_color_hex(0xEF5350)   // Classic red (wifi status)
+#define COL_CUR_PX  lv_color_hex(0xF59E0B)   // Sand Amber
 
 // ── Swipe / gesture state ─────────────────────────────────────────────────────
 static volatile int8_t chart_swipe        = 0;  // horizontal: set by LVGL task

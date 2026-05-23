@@ -21,12 +21,12 @@ static lv_obj_t* status_lbl   = nullptr;
 
 static void build_setup_screen() {
     setup_scr = lv_obj_create(NULL);
-    lv_obj_set_style_bg_color(setup_scr, lv_color_hex(0x0D1117), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(setup_scr, lv_color_hex(0x0E1117), LV_PART_MAIN);
 
     lv_obj_t* title = lv_label_create(setup_scr);
     lv_obj_set_style_text_font(title, &lv_font_montserrat_28, LV_PART_MAIN);
-    lv_obj_set_style_text_color(title, lv_color_hex(0x58A6FF), LV_PART_MAIN);
-    lv_label_set_text(title, "Lil Fish Setup");
+    lv_obj_set_style_text_color(title, lv_color_hex(0xE6E9EF), LV_PART_MAIN);
+    lv_label_set_text(title, "DeskTicker Setup");
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 24);
 
     lv_obj_t* fish = lv_label_create(setup_scr);
@@ -37,7 +37,7 @@ static void build_setup_screen() {
     lv_obj_t* inst1 = lv_label_create(setup_scr);
     lv_obj_set_style_text_font(inst1, &lv_font_montserrat_16, LV_PART_MAIN);
     lv_obj_set_style_text_color(inst1, lv_color_hex(0xCDD9E5), LV_PART_MAIN);
-    lv_label_set_text(inst1, "1. Connect to WiFi:  LilFish-Setup");
+    lv_label_set_text(inst1, "1. Connect to WiFi:  DeskTicker-Setup");
     lv_obj_align(inst1, LV_ALIGN_CENTER, 0, 40);
 
     lv_obj_t* inst2 = lv_label_create(setup_scr);
@@ -48,7 +48,7 @@ static void build_setup_screen() {
 
     status_lbl = lv_label_create(setup_scr);
     lv_obj_set_style_text_font(status_lbl, &lv_font_montserrat_14, LV_PART_MAIN);
-    lv_obj_set_style_text_color(status_lbl, lv_color_hex(0x3FB950), LV_PART_MAIN);
+    lv_obj_set_style_text_color(status_lbl, lv_color_hex(0x22C55E), LV_PART_MAIN);
     lv_label_set_text(status_lbl, "Waiting for connection...");
     lv_obj_align(status_lbl, LV_ALIGN_BOTTOM_MID, 0, -20);
 
@@ -74,11 +74,11 @@ static String build_html(Settings* s) {
     String html = F(
         "<!DOCTYPE html><html><head>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-        "<title>Lil Fish Setup</title>"
+        "<title>DeskTicker Setup</title>"
         "<style>"
         "body{font-family:sans-serif;background:#0d1117;color:#cdd9e5;margin:0;padding:16px}"
-        "h1{color:#58a6ff;text-align:center;margin-bottom:4px}"
-        "h2{color:#58a6ff;border-bottom:1px solid #21262d;padding-bottom:6px;font-size:1rem}"
+        "h1{color:#22c55e;text-align:center;margin-bottom:4px}"
+        "h2{color:#22c55e;border-bottom:1px solid #21262d;padding-bottom:6px;font-size:1rem}"
         ".card{background:#161b22;border:1px solid #21262d;border-radius:8px;padding:14px;margin-bottom:14px}"
         "input[type=text],input[type=password],select{"
         "background:#0d1117;color:#cdd9e5;border:1px solid #30363d;"
@@ -90,17 +90,17 @@ static String build_html(Settings* s) {
         ".tf-btn,.anim-btn,.mode-btn{flex:1;min-width:60px;padding:8px;text-align:center;"
         "background:#21262d;border:2px solid #30363d;border-radius:6px;cursor:pointer;color:#cdd9e5}"
         "input[type=radio]:checked+label.anim-btn,"
-        "input[type=radio]:checked+label.mode-btn{border-color:#58a6ff;background:#0d3060}"
-        "input.tf-cb:checked+label.tf-btn{border-color:#58a6ff;background:#0d3060}"
+        "input[type=radio]:checked+label.mode-btn{border-color:#22c55e;background:#0a2a10}"
+        "input.tf-cb:checked+label.tf-btn{border-color:#22c55e;background:#0a2a10}"
         "input[type=radio],input.tf-cb{display:none}"
         ".theme-row{display:flex;gap:8px;flex-wrap:wrap;margin-top:6px}"
         ".theme-opt{flex:1;min-width:80px;padding:10px;text-align:center;"
         "background:#21262d;border:2px solid #30363d;border-radius:6px;cursor:pointer}"
-        "input[name=theme]:checked+label.theme-opt{border-color:#58a6ff;background:#0d3060}"
+        "input[name=theme]:checked+label.theme-opt{border-color:#22c55e;background:#0a2a10}"
         ".color-row{display:flex;gap:12px;margin-top:8px;align-items:center}"
-        ".btn{background:#1f6feb;color:#fff;border:none;border-radius:8px;"
+        ".btn{background:#22c55e;color:#0e1117;border:none;border-radius:8px;"
         "padding:14px;font-size:1.1rem;width:100%;cursor:pointer;margin-top:8px}"
-        ".btn:active{background:#388bfd}"
+        ".btn:active{background:#16a34a}"
         "#custom_colors{display:none}"
         ".note{color:#8b949e;font-size:.8rem}"
         ".asset-group-label{color:#8b949e;font-size:.75rem;text-transform:uppercase;"
@@ -120,7 +120,7 @@ static String build_html(Settings* s) {
         "document.getElementById('cslider').style.display=m?'none':'block';}"
         "</script>"
         "</head><body>"
-        "<h1>&#62;&#60;&#62; Lil Fish Setup</h1>"
+        "<h1>DeskTicker Setup</h1>"
         "<form method='POST' action='/save'>"
     );
 
@@ -247,7 +247,7 @@ static String build_html(Settings* s) {
 
     // After-hours animation
     const char* anims[]      = {"0","1","2","3"};
-    const char* anim_names[] = {"Aquarium","Beach","Starfield","Countdown"};
+    const char* anim_names[] = {"Tidepool","Coral Reef","Starfield","Countdown"};
     html += F("<div class='card'><h2>After-Hours Animation</h2><div class='anim-row'>");
     for (int i = 0; i < 4; i++) {
         bool sel = (s->after_anim == i);
@@ -348,9 +348,9 @@ static void handle_save() {
     settings_save(s);
 
     server.send(200, "text/html",
-        "<!DOCTYPE html><html><body style='background:#0d1117;color:#3fb950;"
+        "<!DOCTYPE html><html><body style='background:#0e1117;color:#22c55e;"
         "font-family:sans-serif;text-align:center;padding:40px'>"
-        "<h1>&#10003; Saved!</h1><p>Restarting Lil Fish...</p></body></html>");
+        "<h1>&#10003; Saved!</h1><p>Restarting DeskTicker...</p></body></html>");
 
     delay(1500);
     setup_done = true;
@@ -367,7 +367,7 @@ bool wifi_setup_run(Settings* s) {
     setup_done = false;
 
     WiFi.mode(WIFI_AP_STA);
-    WiFi.softAP("LilFish-Setup");
+    WiFi.softAP("DeskTicker-Setup");
     // Note: scanNetworks() is called inside build_html() when the page is requested.
 
     dns.start(53, "*", IPAddress(192, 168, 4, 1));
