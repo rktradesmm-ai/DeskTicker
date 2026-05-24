@@ -130,11 +130,23 @@ static lv_obj_t* make_page(bool hidden) {
     return p;
 }
 
+// Saved scroll position of the main page — restored when back is pressed.
+static lv_coord_t s_main_scroll_y = 0;
+
 // Navigation: show a page and update the header.
 static void show_page(lv_obj_t* page, const char* title) {
-    if (cur_page) lv_obj_add_flag(cur_page, LV_OBJ_FLAG_HIDDEN);
+    if (cur_page) {
+        // Save main page position before navigating away from it.
+        if (cur_page == page_main)
+            s_main_scroll_y = lv_obj_get_scroll_y(page_main);
+        lv_obj_add_flag(cur_page, LV_OBJ_FLAG_HIDDEN);
+    }
     lv_obj_clear_flag(page, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_scroll_to_y(page, 0, LV_ANIM_OFF);
+    // Returning to main: restore where the user was. Sub-pages always start at top.
+    if (page == page_main)
+        lv_obj_scroll_to_y(page, s_main_scroll_y, LV_ANIM_OFF);
+    else
+        lv_obj_scroll_to_y(page, 0, LV_ANIM_OFF);
     cur_page = page;
     lv_label_set_text(hdr_title, title);
     if (page == page_main) {
@@ -569,12 +581,14 @@ static void build_main_page() {
     make_spacer(page_main, 12);
 
     lv_obj_t* btn;
-    btn = make_action_btn(page_main, LV_SYMBOL_WARNING "  Re-do WiFi Setup", SS_AMBER);
+    btn = make_action_btn(page_main, LV_SYMBOL_WARNING "  Re-do WiFi Setup",
+                          lv_color_hex(0xD97706));  // amber-600, darker than SS_AMBER
     lv_obj_add_event_cb(btn, wifi_redo_cb, LV_EVENT_CLICKED, NULL);
 
     make_spacer(page_main, 4);
 
-    btn = make_action_btn(page_main, "Save & Restart", SS_GREEN);
+    btn = make_action_btn(page_main, "Save & Restart",
+                          lv_color_hex(0x16A34A));  // green-700, darker than SS_GREEN
     lv_obj_add_event_cb(btn, save_cb, LV_EVENT_CLICKED, NULL);
 
     make_spacer(page_main, 4);
@@ -972,6 +986,9 @@ static void build_cycle_page() {
 // Brightness page: slider 10-100 % with live preview.
 static void build_bri_page() {
     page_bri = make_page(true);
+    // Content easily fits — disable scroll so the parent doesn't intercept
+    // horizontal drag events meant for the slider.
+    lv_obj_set_scroll_dir(page_bri, LV_DIR_NONE);
 
     make_spacer(page_bri, 24);
 
@@ -986,9 +1003,9 @@ static void build_bri_page() {
     lv_obj_set_style_text_color(bri_val_lbl, SS_TEXT,                LV_PART_MAIN);
     lv_obj_align(bri_val_lbl, LV_ALIGN_CENTER, 0, 0);
 
-    // Slider row
+    // Slider row — slightly taller than the track to give ext_click_area room
     lv_obj_t* sl_row = lv_obj_create(page_bri);
-    lv_obj_set_size(sl_row, LV_PCT(100), 44);
+    lv_obj_set_size(sl_row, LV_PCT(100), 48);
     style_container(sl_row);
     lv_obj_set_style_pad_left(sl_row,  24, LV_PART_MAIN);
     lv_obj_set_style_pad_right(sl_row, 24, LV_PART_MAIN);
@@ -1001,6 +1018,9 @@ static void build_bri_page() {
     lv_obj_set_style_bg_color(bri_slider, SS_DIVIDER, LV_PART_MAIN);
     lv_obj_set_style_bg_color(bri_slider, SS_AMBER,   LV_PART_INDICATOR);
     lv_obj_set_style_bg_color(bri_slider, SS_AMBER,   LV_PART_KNOB);
+    // Extend the hit-test zone 16 px in every direction beyond the visual track,
+    // so first-touch anywhere in the row reliably lands on the slider.
+    lv_obj_set_ext_click_area(bri_slider, 16);
     lv_obj_align(bri_slider, LV_ALIGN_CENTER, 0, 0);
     lv_obj_add_event_cb(bri_slider, bri_slider_cb, LV_EVENT_VALUE_CHANGED, NULL);
 

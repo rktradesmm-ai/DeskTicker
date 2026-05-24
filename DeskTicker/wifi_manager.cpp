@@ -29,17 +29,24 @@ static void build_setup_screen() {
     lv_label_set_text(title, "DeskTicker Setup");
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 24);
 
+    // QR code encodes http://192.168.4.1 — user can scan instead of typing
+    lv_obj_t* qr = lv_qrcode_create(setup_scr, 120,
+                                     lv_color_hex(0x0E1117),   // dark modules (Deep Space)
+                                     lv_color_hex(0xE6E9EF));  // light bg (Pearl)
+    lv_qrcode_update(qr, "http://192.168.4.1", 18);
+    lv_obj_align(qr, LV_ALIGN_TOP_MID, 0, 68);
+
     lv_obj_t* inst1 = lv_label_create(setup_scr);
     lv_obj_set_style_text_font(inst1, &lv_font_montserrat_16, LV_PART_MAIN);
     lv_obj_set_style_text_color(inst1, lv_color_hex(0xCDD9E5), LV_PART_MAIN);
     lv_label_set_text(inst1, "1. Connect to WiFi:  DeskTicker-Setup");
-    lv_obj_align(inst1, LV_ALIGN_CENTER, 0, 40);
+    lv_obj_align(inst1, LV_ALIGN_CENTER, 0, 50);
 
     lv_obj_t* inst2 = lv_label_create(setup_scr);
     lv_obj_set_style_text_font(inst2, &lv_font_montserrat_16, LV_PART_MAIN);
     lv_obj_set_style_text_color(inst2, lv_color_hex(0xCDD9E5), LV_PART_MAIN);
-    lv_label_set_text(inst2, "2. Open:  192.168.4.1");
-    lv_obj_align(inst2, LV_ALIGN_CENTER, 0, 70);
+    lv_label_set_text(inst2, "2. Scan QR  -or-  open 192.168.4.1");
+    lv_obj_align(inst2, LV_ALIGN_CENTER, 0, 75);
 
     status_lbl = lv_label_create(setup_scr);
     lv_obj_set_style_text_font(status_lbl, &lv_font_montserrat_14, LV_PART_MAIN);
