@@ -107,9 +107,9 @@ static uint32_t    countdown   = 0;
 static lv_color_t* anim_bg = nullptr;
 
 // Candle theme colors for the crab's claws. Set by anim_set_candle_colors()
-// before anim_start(). Defaults match the classic teal/red candle theme.
-static uint32_t s_anim_bull = 0x26A69A;
-static uint32_t s_anim_bear = 0xEF5350;
+// before anim_start(). Defaults match the brand-kit Bull Green / Bear Red.
+static uint32_t s_anim_bull = 0x22C55E;
+static uint32_t s_anim_bear = 0xEF4444;
 
 // ── Ordered-dither helper ─────────────────────────────────────────────────────
 // RGB565 has only 32 levels per R/B channel, so smooth gradients band into
@@ -292,6 +292,8 @@ typedef struct {
     uint8_t  walk_tick;   // ticks until next walk-frame flip
     uint16_t blink_cd;    // countdown frames to next blink (or blink duration)
     bool     blinking;    // currently in blink pose?
+    uint16_t celebrate_cd;  // countdown to next claws-raised burst
+    uint8_t  celebrate_fr;  // frames remaining in the claws-raised burst
 } Crab;
 
 typedef struct { int16_t x; float y; } Bubble;
@@ -345,12 +347,12 @@ static void aqua_bg_render() {
                 g = 111.0f - f * 74.0f;
                 b = 140.0f - f * 87.0f;
             } else {
-                // Shore: dark rocky sand, deepening downward
+                // Shore: warm sand (#C9A36B family) deepening from rocky top
                 float denom = (float)(SCR_H - ft);
                 float f = (denom > 0.0f) ? (float)(y - ft) / denom : 1.0f;
-                r = 42.0f + f * 32.0f;
-                g = 34.0f + f * 26.0f;
-                b = 24.0f + f * 10.0f;
+                r = 70.0f + f * 100.0f;
+                g = 55.0f + f *  80.0f;
+                b = 35.0f + f *  55.0f;
             }
             put_dith(anim_bg, x, y, r, g, b);
         }
@@ -406,92 +408,108 @@ static void aqua_bg_render() {
 }
 
 // Returns the bounding box that fully covers the crab sprite at (cx, cy).
+// Covers the worst case (claws_raised adds 6px upward).
 static void crab_bbox_at(int cx, int cy, int* x1, int* y1, int* x2, int* y2) {
-    *x1 = cx - 42;  *y1 = cy - 18;
-    *x2 = cx + 42;  *y2 = cy + 17;
+    *x1 = cx - 25;  *y1 = cy - 25;
+    *x2 = cx + 25;  *y2 = cy + 13;
 }
 
 // Draws a pixel-art crab centered at (cx, cy) onto the given canvas.
-// Left claw = bull_col, right claw = bear_col (user's candle theme colors).
-// blink: draw eyes closed. walk_frame 0/1: alternates leg angles for walking.
+// Pixel layout follows the 48×48 brand-kit spec (deskticker_crab.svg <g id="crab48">).
+// SVG anchor point: shell center at SVG (24, 27) maps to canvas (cx, cy).
+// Left claw = bull_col, right claw = bear_col (user candle theme, set at runtime).
+// blink: replace eyes with thin white slit.
+// walk_frame 0/1: alternates leg y-offsets for walking motion.
+// claws_raised: lifts claw clusters and arms 6 px upward (celebratory pose).
 static void draw_crab(lv_obj_t* canvas, int cx, int cy,
                       lv_color_t bull_col, lv_color_t bear_col,
-                      bool blink, uint8_t walk_frame) {
+                      bool blink, uint8_t walk_frame,
+                      bool claws_raised = false) {
     lv_draw_rect_dsc_t rd;
     lv_draw_rect_dsc_init(&rd);
     rd.border_width = 0;
     rd.radius       = 0;
 
-    lv_color_t shell_dk  = lv_color_hex(0x7A2518);
-    lv_color_t shell_mid = lv_color_hex(0xC04030);
-    lv_color_t shell_hi  = lv_color_hex(0xE06050);
+    // All SVG coordinates offset by the anchor to get canvas coords.
+    // cl: vertical lift applied to claw clusters and arms only.
+    int cl = claws_raised ? -6 : 0;
+    // Walk-frame leg offsets: alternates front/back leg pairs.
+    int w0 = walk_frame ? -2 : 0;
+    int w1 = walk_frame ?  2 : 0;
 
-    int sw = 28, sh = 14;   // shell width / height
-    int sx = cx - sw / 2;   // shell left x
-    int sy = cy - sh / 2;   // shell top y
+    // Inline helpers: R draws a rect at SVG coords with a hex color;
+    //                 RC draws with a pre-formed lv_color_t (for user theme colors).
+    auto R = [&](uint32_t col, int sx, int sy, int sw, int sh) {
+        rd.bg_color = lv_color_hex(col);
+        lv_canvas_draw_rect(canvas, cx + sx - 24, cy + sy - 27, sw, sh, &rd);
+    };
+    auto RC = [&](lv_color_t col, int sx, int sy, int sw, int sh) {
+        rd.bg_color = col;
+        lv_canvas_draw_rect(canvas, cx + sx - 24, cy + sy - 27, sw, sh, &rd);
+    };
 
-    // Legs: 3 per side; walk_frame alternates odd/even leg y-offsets.
-    for (int i = 0; i < 3; i++) {
-        int base_y = sy + 2 + i * 4;
-        int woff   = walk_frame ? (i % 2 == 0 ? -2 : 2) : 0;
-        rd.bg_color = shell_dk;
-        lv_canvas_draw_rect(canvas, sx - 10, base_y + woff, 10, 2, &rd);
-        lv_canvas_draw_rect(canvas, sx + sw,  base_y - woff, 10, 2, &rd);
-    }
+    // ── LEGS (drawn first so shell covers their roots) ────────────────────────
+    R(0xC0432F, 12, 30+w0, 6, 2);  R(0xC0432F,  9, 32+w0, 4, 2);  R(0xC0432F,  7, 34+w0, 2, 3);
+    R(0xC0432F, 13, 34+w1, 6, 2);  R(0xC0432F, 10, 36+w1, 4, 2);
+    R(0xC0432F, 30, 30+w0, 6, 2);  R(0xC0432F, 35, 32+w0, 4, 2);  R(0xC0432F, 39, 34+w0, 2, 3);
+    R(0xC0432F, 29, 34+w1, 6, 2);  R(0xC0432F, 34, 36+w1, 4, 2);
 
-    // Arms extending from shell sides (drawn before shell so shell overlaps root)
-    int arm_y = sy + sh / 3;
-    rd.bg_color = shell_dk;
-    lv_canvas_draw_rect(canvas, sx - 18, arm_y, 18, 3, &rd);
-    lv_canvas_draw_rect(canvas, sx + sw,  arm_y, 18, 3, &rd);
+    // ── ARMS (shell will overlap their shell-side roots) ──────────────────────
+    R(0x241016,  6, 28+cl, 8, 3);  R(0xD94F3D,  7, 29+cl, 6, 1);
+    R(0x241016, 34, 28+cl, 8, 3);  R(0xD94F3D, 35, 29+cl, 6, 1);
 
-    // Shell body (covers leg/arm roots)
-    rd.radius   = LV_RADIUS_CIRCLE;
-    rd.bg_color = shell_mid;
-    lv_canvas_draw_rect(canvas, sx, sy, sw, sh, &rd);
-    rd.radius   = 0;
-    rd.bg_color = shell_hi;
-    lv_canvas_draw_rect(canvas, sx + 5, sy + 2, sw - 10, 4, &rd);
+    // ── CLAW CLUSTERS ─────────────────────────────────────────────────────────
+    // Three candles per side: outline then body.
+    // Left (bull): outer at SVG x=2 (top y=9), middle at x=6 (top y=13, swing-notch),
+    //              inner at x=10 (top y=9).
+    R(0x0F3A1C,  2,  9+cl, 4, 14); RC(bull_col,  3, 10+cl, 2, 12);
+    R(0x0F3A1C,  6, 13+cl, 4, 14); RC(bull_col,  7, 14+cl, 2, 12);
+    R(0x0F3A1C, 10,  9+cl, 4, 14); RC(bull_col, 11, 10+cl, 2, 12);
+    // Right (bear): inner at x=34 (top y=9), middle at x=38 (top y=13),
+    //               outer at x=42 (top y=9).
+    R(0x5A0F12, 34,  9+cl, 4, 14); RC(bear_col, 35, 10+cl, 2, 12);
+    R(0x5A0F12, 38, 13+cl, 4, 14); RC(bear_col, 39, 14+cl, 2, 12);
+    R(0x5A0F12, 42,  9+cl, 4, 14); RC(bear_col, 43, 10+cl, 2, 12);
 
-    // Claws at arm tips: left = bull_col, right = bear_col (V-pincer).
-    rd.bg_color = bull_col;
-    lv_canvas_draw_rect(canvas, sx - 25, arm_y - 3, 7, 3, &rd);
-    lv_canvas_draw_rect(canvas, sx - 25, arm_y + 3, 7, 3, &rd);
-    rd.bg_color = bear_col;
-    lv_canvas_draw_rect(canvas, sx + sw + 18, arm_y - 3, 7, 3, &rd);
-    lv_canvas_draw_rect(canvas, sx + sw + 18, arm_y + 3, 7, 3, &rd);
+    // ── SHELL ─────────────────────────────────────────────────────────────────
+    // Outline first, then fills layered on top.
+    R(0x241016, 14, 20, 20,  2);  // top edge
+    R(0x241016, 11, 22, 26,  2);  // second tier
+    R(0x241016, 10, 24, 28,  9);  // main body outline
+    R(0x241016, 13, 33, 22,  2);  // underbelly
+    R(0xE85D49, 15, 22, 18,  2);  // base fill top
+    R(0xE85D49, 12, 24, 24,  9);  // base fill main
+    R(0xF8836B, 14, 24, 20,  3);  // highlight (top of shell)
+    R(0xD94F3D, 12, 30, 24,  3);  // mid band (bottom of shell)
 
-    // Eye stalks
-    rd.bg_color = shell_dk;
-    lv_canvas_draw_rect(canvas, cx - 6, sy - 6, 2, 6, &rd);
-    lv_canvas_draw_rect(canvas, cx + 4, sy - 6, 2, 6, &rd);
+    // ── EYE STALKS ────────────────────────────────────────────────────────────
+    R(0x241016, 18, 14, 4, 7);  R(0xE85D49, 19, 16, 2, 5);
+    R(0x241016, 26, 14, 4, 7);  R(0xE85D49, 27, 16, 2, 5);
 
-    // Eyes open or blinking
+    // ── EYES ──────────────────────────────────────────────────────────────────
+    R(0x241016, 16, 10, 6, 6);  // left eye socket
+    R(0x241016, 26, 10, 6, 6);  // right eye socket
     if (!blink) {
-        rd.radius   = LV_RADIUS_CIRCLE;
-        rd.bg_color = lv_color_hex(0x0A0A0A);
-        lv_canvas_draw_rect(canvas, cx - 8, sy - 8, 5, 5, &rd);
-        lv_canvas_draw_rect(canvas, cx + 3, sy - 8, 5, 5, &rd);
-        rd.radius   = 0;
-        rd.bg_color = lv_color_hex(0xF0F0F0);
-        lv_canvas_draw_rect(canvas, cx - 7, sy - 7, 2, 2, &rd);
-        lv_canvas_draw_rect(canvas, cx + 4, sy - 7, 2, 2, &rd);
+        R(0xF4F6FA, 17, 11, 4, 4);  R(0x11151C, 18, 12, 2, 3);  R(0xFFFFFF, 17, 11, 1, 1);
+        R(0xF4F6FA, 27, 11, 4, 4);  R(0x11151C, 28, 12, 2, 3);  R(0xFFFFFF, 27, 11, 1, 1);
     } else {
-        rd.bg_color = shell_dk;
-        lv_canvas_draw_rect(canvas, cx - 8, sy - 6, 5, 1, &rd);
-        lv_canvas_draw_rect(canvas, cx + 3, sy - 6, 5, 1, &rd);
+        // Blink: thin white slit across the dark eye socket.
+        R(0xF4F6FA, 17, 13, 4, 1);
+        R(0xF4F6FA, 27, 13, 4, 1);
     }
 }
 
 static void aqua_init() {
     // Crab starts left-of-center, walking right
-    crab_state.x          = SCR_W * 0.32f;
-    crab_state.vx         = 1.3f;
-    crab_state.right      = true;
-    crab_state.walk_frame = 0;
-    crab_state.walk_tick  = 0;
-    crab_state.blink_cd   = (uint16_t)random(100, 220);
-    crab_state.blinking   = false;
+    crab_state.x            = SCR_W * 0.32f;
+    crab_state.vx           = 1.3f;
+    crab_state.right        = true;
+    crab_state.walk_frame   = 0;
+    crab_state.walk_tick    = 0;
+    crab_state.blink_cd     = (uint16_t)random(100, 220);
+    crab_state.blinking     = false;
+    crab_state.celebrate_cd = (uint16_t)random(160, 240);  // ~32-48 s first burst
+    crab_state.celebrate_fr = 0;
 
     // Bubbles spread across the water zone
     for (int i = 0; i < TP_BUBBLE_COUNT; i++) {
@@ -545,6 +563,18 @@ static void aqua_timer_cb(lv_timer_t*) {
         }
     }
 
+    // Celebrate (claws-raised) beat: fires every ~25 s for ~3 s (24 frames at 120ms)
+    bool celebrating = false;
+    if (crab_state.celebrate_fr > 0) {
+        crab_state.celebrate_fr--;
+        celebrating = true;
+    } else if (crab_state.celebrate_cd > 0) {
+        crab_state.celebrate_cd--;
+    } else {
+        crab_state.celebrate_fr = 24;
+        crab_state.celebrate_cd = (uint16_t)random(160, 240);
+    }
+
     // Old bbox (current position before move, used to erase ghost)
     int ocx = (int)crab_state.x;
     int ocy = tp_floor_y(ocx) - 8;
@@ -576,7 +606,7 @@ static void aqua_timer_cb(lv_timer_t*) {
     // Draw crab with current candle-color claws
     draw_crab(anim_canvas, ncx, ncy,
               lv_color_hex(s_anim_bull), lv_color_hex(s_anim_bear),
-              crab_state.blinking, crab_state.walk_frame);
+              crab_state.blinking, crab_state.walk_frame, celebrating);
 
     // ── BUBBLES (tidal water zone) ────────────────────────────────────────────
     lv_draw_rect_dsc_t rdsc;
@@ -709,13 +739,13 @@ static void reef_bg_render() {
         }
     }
 
-    // Coral formations: 5 clusters, blobs baked near the floor
+    // Coral formations: 5 clusters using brand-kit accent coral (#FF7A7A family)
     struct { int cx; int sz; uint32_t col; } coral[5] = {
-        {  60, 22, 0xC84058 },
-        { 155, 18, 0xD86838 },
-        { 250, 24, 0xB83060 },
-        { 355, 20, 0xD04858 },
-        { 440, 16, 0xC86048 },
+        {  60, 22, 0xFF7A7A },
+        { 155, 18, 0xFF9A6A },
+        { 250, 24, 0xFF6A8A },
+        { 355, 20, 0xFF8A70 },
+        { 440, 16, 0xFF7A8A },
     };
     for (int c = 0; c < 5; c++) {
         int ft      = reef_floor_y(coral[c].cx);
@@ -791,13 +821,15 @@ static void reef_init() {
         reef_bubbles[i].y = (float)random(10, ft - 10);
     }
     // Crab walks the reef floor (reuses crab_state — never active with tidepool)
-    crab_state.x          = SCR_W * 0.45f;
-    crab_state.vx         = 1.2f;
-    crab_state.right      = true;
-    crab_state.walk_frame = 0;
-    crab_state.walk_tick  = 0;
-    crab_state.blink_cd   = (uint16_t)random(100, 220);
-    crab_state.blinking   = false;
+    crab_state.x            = SCR_W * 0.45f;
+    crab_state.vx           = 1.2f;
+    crab_state.right        = true;
+    crab_state.walk_frame   = 0;
+    crab_state.walk_tick    = 0;
+    crab_state.blink_cd     = (uint16_t)random(100, 220);
+    crab_state.blinking     = false;
+    crab_state.celebrate_cd = 0;
+    crab_state.celebrate_fr = 0;
 }
 
 static void reef_timer_cb(lv_timer_t*) {
@@ -992,13 +1024,14 @@ static void countdown_crab_cb(lv_timer_t*) {
     int nx1, ny1, nx2, ny2;
     crab_bbox_at(ncx, cy, &nx1, &ny1, &nx2, &ny2);
 
-    // Erase ghost and redraw
+    // Erase ghost and redraw; raise claws in the final 30 s before open
+    bool cd_celebrate = (countdown <= 30);
     cd_crab_erase(
         (ox1 < nx1 ? ox1 : nx1), (oy1 < ny1 ? oy1 : ny1),
         (ox2 > nx2 ? ox2 : nx2), (oy2 > ny2 ? oy2 : ny2));
     draw_crab(cd_crab_canvas, ncx, cy,
               lv_color_hex(s_anim_bull), lv_color_hex(s_anim_bear),
-              crab_state.blinking, crab_state.walk_frame);
+              crab_state.blinking, crab_state.walk_frame, cd_celebrate);
     lv_obj_invalidate(cd_crab_canvas);
 }
 
@@ -1035,13 +1068,15 @@ static void countdown_build() {
         lv_canvas_fill_bg(cd_crab_canvas, lv_color_hex(0x0E1117), LV_OPA_COVER);
 
         // Init crab state (shared struct — tidepool never runs at same time)
-        crab_state.x          = SCR_W * 0.35f;
-        crab_state.vx         = 1.1f;
-        crab_state.right      = true;
-        crab_state.walk_frame = 0;
-        crab_state.walk_tick  = 0;
-        crab_state.blink_cd   = (uint16_t)random(80, 200);
-        crab_state.blinking   = false;
+        crab_state.x            = SCR_W * 0.35f;
+        crab_state.vx           = 1.1f;
+        crab_state.right        = true;
+        crab_state.walk_frame   = 0;
+        crab_state.walk_tick    = 0;
+        crab_state.blink_cd     = (uint16_t)random(80, 200);
+        crab_state.blinking     = false;
+        crab_state.celebrate_cd = 0;
+        crab_state.celebrate_fr = 0;
     }
 
     lv_scr_load(cd_scr);
@@ -1175,4 +1210,14 @@ void anim_set_countdown(uint32_t secs) {
 void anim_set_candle_colors(uint32_t bull, uint32_t bear) {
     s_anim_bull = bull;
     s_anim_bear = bear;
+}
+
+// Public wrapper: draws the brand-spec crab onto any canvas under LV_LOCK.
+// Used by boot splash and any external screen that needs the mascot.
+void anim_draw_crab(lv_obj_t* canvas, int cx, int cy,
+                    uint32_t bull_rgb, uint32_t bear_rgb,
+                    bool blink, uint8_t walk_frame, bool claws_raised) {
+    draw_crab(canvas, cx, cy,
+              lv_color_hex(bull_rgb), lv_color_hex(bear_rgb),
+              blink, walk_frame, claws_raised);
 }

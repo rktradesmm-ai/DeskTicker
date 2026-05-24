@@ -23,10 +23,30 @@ static void build_setup_screen() {
     setup_scr = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(setup_scr, lv_color_hex(0x0E1117), LV_PART_MAIN);
 
-    lv_obj_t* title = lv_label_create(setup_scr);
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_28, LV_PART_MAIN);
-    lv_obj_set_style_text_color(title, lv_color_hex(0xE6E9EF), LV_PART_MAIN);
-    lv_label_set_text(title, "DeskTicker Setup");
+    // "DeskTicker Setup" — D in bull-green, T in bear-red, rest pearl.
+    lv_obj_t* title = lv_spangroup_create(setup_scr);
+    lv_obj_set_style_bg_opa(title, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(title, 0, LV_PART_MAIN);
+    lv_obj_set_style_border_width(title, 0, LV_PART_MAIN);
+    lv_obj_set_width(title,  LV_SIZE_CONTENT);
+    lv_obj_set_height(title, LV_SIZE_CONTENT);
+    {
+        const lv_font_t* f = &lv_font_montserrat_28;
+        lv_span_t* sp;
+        sp = lv_spangroup_new_span(title); lv_span_set_text_static(sp, "D");
+        lv_style_set_text_color(&sp->style, lv_color_hex(0x22C55E));
+        lv_style_set_text_font(&sp->style, f);
+        sp = lv_spangroup_new_span(title); lv_span_set_text_static(sp, "esk");
+        lv_style_set_text_color(&sp->style, lv_color_hex(0xE6E9EF));
+        lv_style_set_text_font(&sp->style, f);
+        sp = lv_spangroup_new_span(title); lv_span_set_text_static(sp, "T");
+        lv_style_set_text_color(&sp->style, lv_color_hex(0xEF4444));
+        lv_style_set_text_font(&sp->style, f);
+        sp = lv_spangroup_new_span(title); lv_span_set_text_static(sp, "icker Setup");
+        lv_style_set_text_color(&sp->style, lv_color_hex(0xE6E9EF));
+        lv_style_set_text_font(&sp->style, f);
+        lv_spangroup_refr_mode(title);  // compute size before alignment
+    }
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 24);
 
     // QR code encodes http://192.168.4.1 — user can scan instead of typing

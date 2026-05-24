@@ -118,30 +118,84 @@ static void cleanup_pending_scr() {
 }
 
 // ── Splash screen ─────────────────────────────────────────────────────────────
-static void show_splash() {
-    if (!LV_LOCK()) return;
 
-    lv_obj_t* scr = lv_obj_create(NULL);
-    lv_obj_set_style_bg_color(scr, lv_color_hex(0x0E1117), LV_PART_MAIN);
+// Frees the PSRAM canvas buffer when the splash screen object is deleted.
+static void splash_buf_free_cb(lv_event_t* e) {
+    void* buf = lv_event_get_user_data(e);
+    if (buf) heap_caps_free(buf);
+}
 
-    lv_obj_t* name = lv_label_create(scr);
-    lv_obj_set_style_text_font(name, &lv_font_montserrat_28, LV_PART_MAIN);
-    lv_obj_set_style_text_color(name, lv_color_hex(0xE6E9EF), LV_PART_MAIN);
-    lv_label_set_text(name, "DeskTicker");
-    lv_obj_align(name, LV_ALIGN_CENTER, 0, -10);
+// Helper: adds the colored "DeskTicker" spangroup and tagline to a screen.
+static void splash_add_wordmark(lv_obj_t* scr, int y_ofs_wm, int y_ofs_tag) {
+    lv_obj_t* sg = lv_spangroup_create(scr);
+    lv_obj_set_style_bg_opa(sg, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(sg, 0, LV_PART_MAIN);
+    lv_obj_set_style_border_width(sg, 0, LV_PART_MAIN);
+    lv_obj_set_width(sg,  LV_SIZE_CONTENT);
+    lv_obj_set_height(sg, LV_SIZE_CONTENT);
+
+    const lv_font_t* f = &lv_font_montserrat_40;
+    lv_span_t* sp;
+    sp = lv_spangroup_new_span(sg); lv_span_set_text_static(sp, "D");
+    lv_style_set_text_color(&sp->style, lv_color_hex(0x22C55E));
+    lv_style_set_text_font(&sp->style, f);
+    sp = lv_spangroup_new_span(sg); lv_span_set_text_static(sp, "esk");
+    lv_style_set_text_color(&sp->style, lv_color_hex(0xE6E9EF));
+    lv_style_set_text_font(&sp->style, f);
+    sp = lv_spangroup_new_span(sg); lv_span_set_text_static(sp, "T");
+    lv_style_set_text_color(&sp->style, lv_color_hex(0xEF4444));
+    lv_style_set_text_font(&sp->style, f);
+    sp = lv_spangroup_new_span(sg); lv_span_set_text_static(sp, "icker");
+    lv_style_set_text_color(&sp->style, lv_color_hex(0xE6E9EF));
+    lv_style_set_text_font(&sp->style, f);
+    lv_spangroup_refr_mode(sg);  // compute size before alignment
+    lv_obj_align(sg, LV_ALIGN_CENTER, 0, y_ofs_wm);
 
     lv_obj_t* sub = lv_label_create(scr);
     lv_obj_set_style_text_font(sub, &lv_font_montserrat_14, LV_PART_MAIN);
     lv_obj_set_style_text_color(sub, lv_color_hex(0x7A8290), LV_PART_MAIN);
     lv_label_set_text(sub, "The market, on your desk.");
-    lv_obj_align(sub, LV_ALIGN_CENTER, 0, 26);
+    lv_obj_align(sub, LV_ALIGN_CENTER, 0, y_ofs_tag);
+}
 
-    lv_scr_load(scr);
-    // Queue splash for deletion — it will be freed after the next screen loads.
+static void show_splash() {
+    // PSRAM canvas for the crab pixel art. Text uses LVGL widgets (no extra flush).
+    lv_color_t* splash_buf = (lv_color_t*)heap_caps_malloc(
+        (size_t)SCR_W * SCR_H * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
+
+    if (!LV_LOCK()) { if (splash_buf) heap_caps_free(splash_buf); return; }
+
+    lv_obj_t* scr = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(scr, lv_color_hex(0x0E1117), LV_PART_MAIN);
+
+    if (splash_buf) {
+        // Attach delete callback so PSRAM buffer is freed when screen is deleted.
+        lv_obj_add_event_cb(scr, splash_buf_free_cb, LV_EVENT_DELETE, splash_buf);
+        lv_obj_t* cvs = lv_canvas_create(scr);
+        lv_canvas_set_buffer(cvs, splash_buf, SCR_W, SCR_H, LV_IMG_CF_TRUE_COLOR);
+        lv_obj_set_pos(cvs, 0, 0);
+        lv_canvas_fill_bg(cvs, lv_color_hex(0x0E1117), LV_OPA_COVER);
+
+        // "The Pinch" lockup: crab perched directly above the wordmark,
+        // claws hanging down naturally toward the D (left/green) and T (right/red).
+        // Wordmark center at (SCR_W/2, SCR_H/2 + 18) = (240, 178), ~40 px tall.
+        // Crab cy=142 places its lowest legs ~6 px above the wordmark top edge.
+        anim_draw_crab(cvs, SCR_W / 2, 136,
+                       cfg.bull_rgb, cfg.bear_rgb,
+                       /*blink=*/false, /*walk_frame=*/0, /*claws_raised=*/false);
+    } else {
+        // PSRAM unavailable: wordmark-only fallback.
+        splash_add_wordmark(scr, 0, 38);
+    }
+
+    // Wordmark and tagline are LVGL widgets — they don't trigger an extra flush.
+    if (splash_buf) splash_add_wordmark(scr, 18, 56);
+
+    lv_scr_load(scr);           // single full-screen flush, no separate invalidate
     queue_scr_for_delete(scr);
     LV_UNLOCK();
 
-    delay(2000);  // show splash for 2 seconds
+    delay(3000);  // static hold; WiFi connecting in background
 }
 
 // ── Connecting screen ─────────────────────────────────────────────────────────
@@ -285,9 +339,25 @@ void setup() {
                   cfg.wifi_ok, cfg.asset_count, cfg.timeframe, cfg.brightness);
     bsp_display_brightness_set(cfg.brightness);
 
+    // Kick off WiFi before the splash so the 3 s hold isn't dead time.
+    if (cfg.wifi_ok) {
+        WiFi.mode(WIFI_STA);
+        WiFi.begin(cfg.wifi_ssid, cfg.wifi_pass);
+        Serial.println("[setup] WiFi.begin issued (background)");
+    }
+
     show_splash();
     Serial.println("[setup] splash shown");
-    state = cfg.wifi_ok ? S_CONNECTING : S_WIFI_SETUP;
+
+    if (!cfg.wifi_ok) {
+        state = S_WIFI_SETUP;
+    } else if (WiFi.status() == WL_CONNECTED) {
+        Serial.printf("[setup] WiFi up during splash: %s\n",
+                      WiFi.localIP().toString().c_str());
+        state = S_NTP_SYNC;   // skip "Connecting to WiFi..." screen
+    } else {
+        state = S_CONNECTING;
+    }
 }
 
 // ── Loop / State machine ──────────────────────────────────────────────────────
