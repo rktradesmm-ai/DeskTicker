@@ -293,9 +293,10 @@ static void update_main_theme_label() {
 
 static void update_main_anim_label() {
     if (!main_val_anim) return;
-    const char* names[] = {"Tidepool", "Coral Reef", "Starfield", "Countdown"};
+    const char* names[] = {"Tidepool", "Coral Reef", "Starfield", "Countdown",
+                           "Pixel Beach", "Market Pit"};
     int a = ss_work.after_anim;
-    if (a < 0 || a > 3) a = 0;
+    if (a < 0 || a > 5) a = 0;
     lv_label_set_text(main_val_anim, names[a]);
 }
 
@@ -860,9 +861,9 @@ static void build_anim_page() {
 
     anim_roller = lv_roller_create(page_anim);
     lv_roller_set_options(anim_roller,
-        "Tidepool\nCoral Reef\nStarfield\nCountdown",
+        "Tidepool\nCoral Reef\nStarfield\nCountdown\nPixel Beach\nMarket Pit",
         LV_ROLLER_MODE_NORMAL);
-    lv_roller_set_visible_row_count(anim_roller, 4);
+    lv_roller_set_visible_row_count(anim_roller, 6);
     lv_obj_set_size(anim_roller, LV_PCT(100), CONT_H - 20);
     lv_obj_align(anim_roller, LV_ALIGN_TOP_MID, 0, 0);
     lv_obj_set_style_bg_color(anim_roller,     SS_BG,     LV_PART_MAIN);
@@ -873,7 +874,7 @@ static void build_anim_page() {
     lv_obj_set_style_border_color(anim_roller, SS_DIVIDER, LV_PART_MAIN);
 
     int a = ss_work.after_anim;
-    if (a < 0 || a > 3) a = 0;
+    if (a < 0 || a > 5) a = 0;
     lv_roller_set_selected(anim_roller, (uint16_t)a, LV_ANIM_OFF);
 
     lv_obj_add_event_cb(anim_roller, [](lv_event_t*) {

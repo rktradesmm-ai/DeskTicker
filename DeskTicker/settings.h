@@ -12,10 +12,12 @@
 #define THEME_NEONPULSE   2
 #define THEME_CUSTOM      3
 
-#define ANIM_AQUARIUM  0
-#define ANIM_BEACH     1
-#define ANIM_STARFIELD 2
-#define ANIM_COUNTDOWN 3
+#define ANIM_AQUARIUM   0
+#define ANIM_BEACH      1
+#define ANIM_STARFIELD  2
+#define ANIM_COUNTDOWN  3
+#define ANIM_PIXELBEACH 4
+#define ANIM_MARKETPIT  5
 
 typedef struct {
     char     wifi_ssid[64];
