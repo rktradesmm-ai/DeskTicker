@@ -948,12 +948,574 @@ static void reef_timer_cb(lv_timer_t*) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
+// PIXEL BEACH (NIGHT)
+// ══════════════════════════════════════════════════════════════════════════════
+#define PB_HORIZON    210   // y where water meets sand
+#define PB_SAND_TOP   265   // y where dry sand starts
+#define PB_LH_X       420   // lighthouse pillar center x
+#define PB_LH_BASE    260   // y of lighthouse base (in the sand)
+#define PB_LH_TOP     190   // y of lighthouse top beacon
+#define PB_BEACON_MS  4000  // full blink cycle in ms
+#define PB_BEACON_ON  250   // ON phase duration in ms
+
+// Footprint ring buffer (crab leaves prints in wet sand)
+#define PB_PRINT_MAX  12
+typedef struct { int16_t x, y; } Footprint;
+static Footprint pb_prints[PB_PRINT_MAX];
+static int    pb_print_head  = 0;
+static int    pb_print_count = 0;
+static uint8_t pb_print_tick  = 0;
+
+// Wave foam phase counter
+static uint8_t pb_wave_phase = 0;
+
+// Lighthouse beacon phase
+static unsigned long pb_beacon_last_ms = 0;
+static bool          pb_beacon_on      = false;
+static int           pb_beacon_frames  = 0;   // frames remaining while ON
+
+// Flat sand floor for this scene
+static inline int pixbeach_floor_y(int x) {
+    (void)x;
+    return PB_SAND_TOP;
+}
+
+// Bake the static night-beach background into anim_bg.
+static void pixbeach_bg_render() {
+    if (!anim_bg) return;
+
+    // Sky + sea + sand fill
+    for (int y = 0; y < SCR_H; y++) {
+        for (int x = 0; x < SCR_W; x++) {
+            float r, g, b;
+            if (y < PB_HORIZON) {
+                // Night sky: deep navy at top → purple-navy at horizon
+                float f = (float)y / PB_HORIZON;
+                r = 6.0f  + f * 20.0f;
+                g = 7.0f  + f * 11.0f;
+                b = 13.0f + f * 37.0f;
+            } else if (y < PB_SAND_TOP) {
+                // Dark teal water
+                float f = (float)(y - PB_HORIZON) / (PB_SAND_TOP - PB_HORIZON);
+                r = 15.0f - f *  5.0f;
+                g = 42.0f + f * 10.0f;
+                b = 56.0f - f * 10.0f;
+            } else {
+                // Dim warm sand
+                float f = (float)(y - PB_SAND_TOP) / (SCR_H - PB_SAND_TOP);
+                r = 58.0f + f * 32.0f;
+                g = 46.0f + f * 20.0f;
+                b = 30.0f + f * 12.0f;
+            }
+            put_dith(anim_bg, x, y, r, g, b);
+        }
+    }
+
+    // Horizon shimmer
+    for (int x = 0; x < SCR_W; x++) {
+        float sh = 0.5f + 0.5f * sinf(x * 0.06f);
+        put_dith(anim_bg, x, PB_HORIZON,
+                 20.0f * sh, 55.0f * sh, 70.0f * sh);
+    }
+
+    // Crescent moon: white disc + deep-space overlay to carve crescent
+    aqua_blot(SCR_W - 90, 40, 14, 200.0f, 200.0f, 185.0f);   // full disc
+    aqua_blot(SCR_W - 82, 36, 13, 6.0f, 7.0f, 13.0f);         // carve crescent
+
+    // Baked stars
+    for (int i = 0; i < 38; i++) {
+        int sx = random(0, SCR_W - 20);
+        int sy = random(2, PB_HORIZON - 30);
+        uint8_t bv = (uint8_t)random(55, 190);
+        put_dith(anim_bg, sx, sy, (float)bv, (float)bv, (float)bv * 0.9f);
+        if (bv > 130 && sx + 1 < SCR_W)
+            put_dith(anim_bg, sx + 1, sy, bv * 0.45f, bv * 0.45f, bv * 0.45f);
+    }
+
+    // Sand grain pebbles
+    static const uint32_t PB_PEB[4] = { 0x2A1E14, 0x3A2A1C, 0x1E1610, 0x4A3828 };
+    for (int p = 0; p < 80; p++) {
+        int px  = random(2, SCR_W - 2);
+        int py  = PB_SAND_TOP + random(1, SCR_H - PB_SAND_TOP - 1);
+        int rad = random(0, 2);  // 0 = 1px, 1 = 2px
+        uint32_t c = PB_PEB[random(0, 4)];
+        if (rad == 0) {
+            put_dith(anim_bg, px, py,
+                     (float)((c >> 16) & 0xFF),
+                     (float)((c >>  8) & 0xFF),
+                     (float)( c        & 0xFF));
+        } else {
+            aqua_blot(px, py, rad,
+                      (float)((c >> 16) & 0xFF),
+                      (float)((c >>  8) & 0xFF),
+                      (float)( c        & 0xFF));
+        }
+    }
+
+    // Lighthouse silhouette (static baked pillar; beacon drawn per-frame)
+    // Pillar: 6 px wide, dark gray-blue
+    for (int ly = PB_LH_TOP + 10; ly < PB_LH_BASE; ly++) {
+        for (int lx = PB_LH_X - 3; lx <= PB_LH_X + 3; lx++) {
+            if (lx < 0 || lx >= SCR_W || ly < 0 || ly >= SCR_H) continue;
+            float shade = 0.7f + 0.3f * (float)(lx - (PB_LH_X - 3)) / 6.0f;
+            put_dith(anim_bg, lx, ly, 28.0f * shade, 36.0f * shade, 48.0f * shade);
+        }
+    }
+    // Lantern room cap: 10 px wide, slightly lighter
+    for (int ly = PB_LH_TOP; ly < PB_LH_TOP + 10; ly++) {
+        for (int lx = PB_LH_X - 5; lx <= PB_LH_X + 5; lx++) {
+            if (lx < 0 || lx >= SCR_W || ly < 0 || ly >= SCR_H) continue;
+            put_dith(anim_bg, lx, ly, 55.0f, 65.0f, 80.0f);
+        }
+    }
+}
+
+static void pixbeach_init() {
+    pb_print_head  = 0;
+    pb_print_count = 0;
+    pb_print_tick  = 0;
+    pb_wave_phase  = 0;
+    pb_beacon_last_ms = millis();
+    pb_beacon_on      = false;
+    pb_beacon_frames  = 0;
+
+    crab_state.x            = SCR_W * 0.35f;
+    crab_state.vx           = 1.2f;
+    crab_state.right        = true;
+    crab_state.walk_frame   = 0;
+    crab_state.walk_tick    = 0;
+    crab_state.blink_cd     = (uint16_t)random(100, 220);
+    crab_state.blinking     = false;
+    crab_state.celebrate_cd = (uint16_t)random(160, 240);
+    crab_state.celebrate_fr = 0;
+}
+
+static void pixbeach_timer_cb(lv_timer_t*) {
+    if (!anim_canvas || !anim_bg) return;
+    wdt_feed();
+
+    // ── WAVE FOAM LINE ────────────────────────────────────────────────────────
+    // Erase previous foam strip from the full-width band at the sand edge
+    bg_restore(0, PB_SAND_TOP - 3, SCR_W - 1, PB_SAND_TOP + 2);
+
+    // Draw new foam: 1 px sinusoid sliding left
+    lv_draw_rect_dsc_t wd;
+    lv_draw_rect_dsc_init(&wd);
+    wd.radius = 0; wd.border_width = 0;
+    wd.bg_color = lv_color_hex(0xB0C8D0);
+    wd.bg_opa   = LV_OPA_60;
+    pb_wave_phase++;
+    for (int x = 0; x < SCR_W; x++) {
+        int wy = PB_SAND_TOP - 1 + (int)(2.0f * sinf((x + pb_wave_phase) * 0.08f));
+        if (wy >= 0 && wy < SCR_H)
+            lv_canvas_draw_rect(anim_canvas, x, wy, 1, 1, &wd);
+    }
+
+    // ── LIGHTHOUSE BEACON ─────────────────────────────────────────────────────
+    unsigned long now_ms = millis();
+    if (!pb_beacon_on && (now_ms - pb_beacon_last_ms) >= PB_BEACON_MS) {
+        pb_beacon_on      = true;
+        pb_beacon_frames  = (int)(PB_BEACON_ON / 120);
+        if (pb_beacon_frames < 1) pb_beacon_frames = 1;
+        pb_beacon_last_ms = now_ms;
+    }
+
+    // Always restore the beacon area first
+    bg_restore(PB_LH_X - 32, PB_LH_TOP - 4, PB_LH_X + 32, PB_LH_TOP + 10);
+
+    if (pb_beacon_on) {
+        // Halo on lantern top
+        lv_draw_rect_dsc_t hd;
+        lv_draw_rect_dsc_init(&hd);
+        hd.radius = LV_RADIUS_CIRCLE; hd.border_width = 0;
+        hd.bg_color = lv_color_hex(0xF5E8A0);
+        hd.bg_opa   = LV_OPA_50;
+        lv_canvas_draw_rect(anim_canvas, PB_LH_X - 4, PB_LH_TOP - 3, 9, 9, &hd);
+
+        // Amber wedge fan over water
+        lv_draw_rect_dsc_t rd2;
+        lv_draw_rect_dsc_init(&rd2);
+        rd2.radius = 0; rd2.border_width = 0;
+        rd2.bg_color = lv_color_hex(0xF59E0B);
+        for (int fy = PB_LH_TOP; fy < PB_LH_TOP + 30; fy++) {
+            int half = (fy - PB_LH_TOP) / 2 + 1;
+            int wx = PB_LH_X - half;
+            rd2.bg_opa = (lv_opa_t)(55 - (fy - PB_LH_TOP));
+            if (rd2.bg_opa < 5) rd2.bg_opa = 5;
+            if (wx >= 0 && wx + half * 2 <= SCR_W && fy >= 0 && fy < SCR_H)
+                lv_canvas_draw_rect(anim_canvas, wx, fy, half * 2, 1, &rd2);
+        }
+
+        pb_beacon_frames--;
+        if (pb_beacon_frames <= 0) pb_beacon_on = false;
+    }
+
+    // ── CRAB + FOOTPRINTS ─────────────────────────────────────────────────────
+    crab_state.walk_tick++;
+    if (crab_state.walk_tick >= 8) {
+        crab_state.walk_tick  = 0;
+        crab_state.walk_frame ^= 1;
+    }
+
+    // Blink
+    if (crab_state.blinking) {
+        if (crab_state.blink_cd > 0) crab_state.blink_cd--;
+        if (crab_state.blink_cd == 0) {
+            crab_state.blinking = false;
+            crab_state.blink_cd = (uint16_t)random(100, 220);
+        }
+    } else {
+        if (crab_state.blink_cd > 0) crab_state.blink_cd--;
+        else { crab_state.blinking = true; crab_state.blink_cd = 3; }
+    }
+
+    // Celebrate
+    bool celebrating = false;
+    if (crab_state.celebrate_fr > 0) {
+        crab_state.celebrate_fr--;
+        celebrating = true;
+    } else if (crab_state.celebrate_cd > 0) {
+        crab_state.celebrate_cd--;
+    } else {
+        crab_state.celebrate_fr = 24;
+        crab_state.celebrate_cd = (uint16_t)random(160, 240);
+    }
+
+    int ocx = (int)crab_state.x;
+    int ocy = pixbeach_floor_y(ocx) - 8;
+    int ox1, oy1, ox2, oy2;
+    crab_bbox_at(ocx, ocy, &ox1, &oy1, &ox2, &oy2);
+
+    crab_state.x += crab_state.vx;
+    if (crab_state.x < 48.0f) {
+        crab_state.vx = fabsf(crab_state.vx); crab_state.right = true;
+    }
+    if (crab_state.x > (float)(SCR_W - 48)) {
+        crab_state.vx = -fabsf(crab_state.vx); crab_state.right = false;
+    }
+
+    int ncx = (int)crab_state.x;
+    int ncy = pixbeach_floor_y(ncx) - 8;
+    int nx1, ny1, nx2, ny2;
+    crab_bbox_at(ncx, ncy, &nx1, &ny1, &nx2, &ny2);
+
+    bg_restore((ox1 < nx1 ? ox1 : nx1), (oy1 < ny1 ? oy1 : ny1),
+               (ox2 > nx2 ? ox2 : nx2), (oy2 > ny2 ? oy2 : ny2));
+
+    // Drop a footprint every 8 frames in the sand zone
+    pb_print_tick++;
+    if (pb_print_tick >= 8) {
+        pb_print_tick = 0;
+        int py = ncy + 14;   // bottom of crab sprite
+        if (py >= PB_SAND_TOP && py < SCR_H - 4) {
+            // Draw print into live canvas buffer (not anim_bg — wave overwrites)
+            lv_draw_rect_dsc_t pd;
+            lv_draw_rect_dsc_init(&pd);
+            pd.radius = 0; pd.border_width = 0;
+            pd.bg_color = lv_color_hex(0x2A1E14);
+            pd.bg_opa   = LV_OPA_70;
+            lv_canvas_draw_rect(anim_canvas, ncx - 2, py, 2, 2, &pd);
+            lv_canvas_draw_rect(anim_canvas, ncx + 2, py, 2, 2, &pd);
+            pb_prints[pb_print_head].x = (int16_t)ncx;
+            pb_prints[pb_print_head].y = (int16_t)py;
+            pb_print_head = (pb_print_head + 1) % PB_PRINT_MAX;
+            if (pb_print_count < PB_PRINT_MAX) pb_print_count++;
+        }
+    }
+
+    draw_crab(anim_canvas, ncx, ncy,
+              lv_color_hex(s_anim_bull), lv_color_hex(s_anim_bear),
+              crab_state.blinking, crab_state.walk_frame, celebrating);
+
+    lv_obj_invalidate(anim_canvas);
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// MARKET PIT (EASTER EGG)
+// ══════════════════════════════════════════════════════════════════════════════
+#define PIT_FLOOR_Y   260   // y of the trading floor surface
+#define PIT_BOARD_Y     8   // y of ticker board top
+#define PIT_BOARD_H    26   // height of the board strip
+#define PIT_BELL_CX   240   // bell center x (mid-screen)
+#define PIT_BELL_CY    50   // bell center y
+#define PIT_BELL_PERIOD_MS  15000
+#define PIT_BOARD_CELLS      6
+#define PIT_BOARD_CELL_W    75   // (480 / 6 = 80, minus 5 gap)
+
+// Fake ticker symbols for the board
+static const char* const PIT_TICKERS[PIT_BOARD_CELLS] = {
+    "AAPL", "BTC", "NVDA", "SPY", "GOLD", "TSLA"
+};
+
+// Per-cell fake price strings (updated by flicker)
+static char pit_prices[PIT_BOARD_CELLS][8];
+static bool pit_cell_up[PIT_BOARD_CELLS];
+
+static unsigned long pit_bell_last_ms  = 0;
+static int           pit_bell_frames   = 0;
+
+// Ticket wave state: held above crab's right claw
+static uint8_t pit_ticket_tick  = 0;
+static int8_t  pit_ticket_flip  = 0;    // ±1 px y wobble
+
+// Board flicker state
+static uint8_t pit_flicker_tick = 0;
+
+// Draw one ticker-board cell at column i into a canvas (for both bake + flicker).
+static void pit_draw_cell(lv_obj_t* canvas, int i, bool baked_mode) {
+    int cx = i * (PIT_BOARD_CELL_W + 5) + 5;
+    lv_draw_rect_dsc_t bd;
+    lv_draw_rect_dsc_init(&bd);
+    bd.radius = 0; bd.border_width = 0;
+    bd.bg_color = lv_color_hex(0x0A0A06);
+    lv_canvas_draw_rect(canvas, cx, PIT_BOARD_Y, PIT_BOARD_CELL_W, PIT_BOARD_H, &bd);
+
+    // Ticker symbol in Amber
+    lv_draw_label_dsc_t ld;
+    lv_draw_label_dsc_init(&ld);
+    ld.color = lv_color_hex(0xF59E0B);
+    ld.font  = &lv_font_montserrat_10;
+    lv_point_t p1 = { (lv_coord_t)(cx + 3), (lv_coord_t)(PIT_BOARD_Y + 2) };
+    lv_canvas_draw_text(canvas, p1.x, p1.y, PIT_BOARD_CELL_W - 4, &ld,
+                        PIT_TICKERS[i]);
+
+    // Price + arrow in Green/Red
+    lv_draw_label_dsc_t pd;
+    lv_draw_label_dsc_init(&pd);
+    pd.color = pit_cell_up[i] ? lv_color_hex(0x22C55E) : lv_color_hex(0xEF4444);
+    pd.font  = &lv_font_montserrat_10;
+    lv_point_t p2 = { (lv_coord_t)(cx + 3), (lv_coord_t)(PIT_BOARD_Y + 13) };
+    lv_canvas_draw_text(canvas, p2.x, p2.y, PIT_BOARD_CELL_W - 4, &pd,
+                        pit_prices[i]);
+    (void)baked_mode;
+}
+
+// Add pinstripe overlay on crab's shell (market pit costume).
+// Call immediately after draw_crab for this scene only — does not touch draw_crab.
+static void draw_pinstripes(lv_obj_t* canvas, int cx, int cy) {
+    lv_draw_rect_dsc_t rd;
+    lv_draw_rect_dsc_init(&rd);
+    rd.radius = 0; rd.border_width = 0;
+    rd.bg_color = lv_color_hex(0xDDE0E8);
+    rd.bg_opa   = LV_OPA_50;
+    // Three 1-px vertical lines across the shell body band (SVG y 24-33 → canvas)
+    int base_y = cy + (24 - 27);
+    int h = 9;
+    for (int s = 0; s < 3; s++) {
+        int sx = cx + (17 - 24) + s * 6;   // spaced 6 px apart
+        lv_canvas_draw_rect(canvas, sx, base_y, 1, h, &rd);
+    }
+}
+
+static void pit_bg_render() {
+    if (!anim_bg) return;
+
+    // Room wall gradient: warm amber at top → dark amber at floor
+    for (int y = 0; y < SCR_H; y++) {
+        float f = (float)y / SCR_H;
+        float r, g, b;
+        if (y >= PIT_FLOOR_Y) {
+            // Hardwood floor: dark chestnut
+            float ff = (float)(y - PIT_FLOOR_Y) / (SCR_H - PIT_FLOOR_Y);
+            r = 28.0f + ff * 14.0f;
+            g = 16.0f + ff *  8.0f;
+            b =  6.0f + ff *  4.0f;
+        } else {
+            r = 58.0f - f * 32.0f;
+            g = 40.0f - f * 25.0f;
+            b = 24.0f - f * 18.0f;
+        }
+        for (int x = 0; x < SCR_W; x++)
+            put_dith(anim_bg, x, y, r, g, b);
+    }
+
+    // Hardwood floor planks: subtle horizontal lines
+    lv_draw_rect_dsc_t fld;
+    lv_draw_rect_dsc_init(&fld);
+    fld.radius = 0; fld.border_width = 0;
+    fld.bg_color = lv_color_hex(0x100808);
+    fld.bg_opa   = LV_OPA_40;
+    for (int py = PIT_FLOOR_Y + 12; py < SCR_H; py += 14) {
+        // Bake directly into anim_bg as horizontal stripe
+        for (int bx = 0; bx < SCR_W; bx++)
+            put_dith(anim_bg, bx, py, 10.0f, 6.0f, 3.0f);
+    }
+
+    // Ticker board border (top strip)
+    for (int by = PIT_BOARD_Y; by < PIT_BOARD_Y + PIT_BOARD_H + 2; by++) {
+        for (int bx = 0; bx < SCR_W; bx++)
+            put_dith(anim_bg, bx, by, 8.0f, 8.0f, 5.0f);
+    }
+
+    // Bell (brass disc above center)
+    aqua_blot(PIT_BELL_CX, PIT_BELL_CY, 10, 180.0f, 130.0f, 30.0f);
+    aqua_blot(PIT_BELL_CX - 2, PIT_BELL_CY - 3, 4, 220.0f, 185.0f, 80.0f); // shine
+    // Bell handle
+    for (int bh = PIT_BELL_CY - 18; bh < PIT_BELL_CY - 10; bh++) {
+        if (bh >= 0 && bh < SCR_H)
+            put_dith(anim_bg, PIT_BELL_CX, bh, 100.0f, 72.0f, 18.0f);
+    }
+
+    // Init fake prices before baking board cells
+    for (int i = 0; i < PIT_BOARD_CELLS; i++) {
+        pit_cell_up[i] = (bool)(random(0, 2));
+        int price = random(80, 999);
+        snprintf(pit_prices[i], sizeof(pit_prices[i]),
+                 "%s%3d", pit_cell_up[i] ? "\x18" : "\x19", price);
+    }
+
+    // Bake board cells (text drawn into anim_bg via a temporary canvas op — we
+    // just bake the background rectangles; cell text is drawn each frame via
+    // anim_canvas since lv_canvas_draw_text draws to the canvas, not the raw buf)
+    // Board cell text will be re-rendered each frame (cheap: only 6 small labels).
+}
+
+static void pit_init() {
+    pit_bell_last_ms  = millis();
+    pit_bell_frames   = 0;
+    pit_ticket_tick   = 0;
+    pit_ticket_flip   = 0;
+    pit_flicker_tick  = 0;
+
+    crab_state.x            = SCR_W * 0.40f;
+    crab_state.vx           = 1.1f;
+    crab_state.right        = true;
+    crab_state.walk_frame   = 0;
+    crab_state.walk_tick    = 0;
+    crab_state.blink_cd     = (uint16_t)random(100, 220);
+    crab_state.blinking     = false;
+    crab_state.celebrate_cd = (uint16_t)random(160, 240);
+    crab_state.celebrate_fr = 0;
+}
+
+static void pit_timer_cb(lv_timer_t*) {
+    if (!anim_canvas || !anim_bg) return;
+    wdt_feed();
+
+    // ── TICKER BOARD (top strip, redrawn each frame) ──────────────────────────
+    // Erase the whole board strip from bg, then redraw all 6 cells fresh.
+    bg_restore(0, PIT_BOARD_Y - 1, SCR_W - 1, PIT_BOARD_Y + PIT_BOARD_H + 2);
+    for (int i = 0; i < PIT_BOARD_CELLS; i++)
+        pit_draw_cell(anim_canvas, i, false);
+
+    // Price flicker: one random cell updates every ~25 frames
+    pit_flicker_tick++;
+    if (pit_flicker_tick >= 25) {
+        pit_flicker_tick = 0;
+        int idx = random(0, PIT_BOARD_CELLS);
+        pit_cell_up[idx] = (bool)(random(0, 2));
+        int price = random(80, 999);
+        snprintf(pit_prices[idx], sizeof(pit_prices[idx]),
+                 "%s%3d", pit_cell_up[idx] ? "\x18" : "\x19", price);
+    }
+
+    // ── BELL FLASH ────────────────────────────────────────────────────────────
+    unsigned long now_ms = millis();
+    if (pit_bell_frames == 0 && (now_ms - pit_bell_last_ms) >= PIT_BELL_PERIOD_MS) {
+        pit_bell_frames   = 6;
+        pit_bell_last_ms  = now_ms;
+    }
+
+    bg_restore(PIT_BELL_CX - 16, PIT_BELL_CY - 22, PIT_BELL_CX + 16, PIT_BELL_CY + 14);
+    if (pit_bell_frames > 0) {
+        lv_draw_rect_dsc_t bfd;
+        lv_draw_rect_dsc_init(&bfd);
+        bfd.radius = LV_RADIUS_CIRCLE; bfd.border_width = 0;
+        bfd.bg_color = lv_color_hex(0xF59E0B);
+        bfd.bg_opa   = LV_OPA_40;
+        lv_canvas_draw_rect(anim_canvas,
+                            PIT_BELL_CX - 14, PIT_BELL_CY - 14, 29, 29, &bfd);
+        pit_bell_frames--;
+    }
+
+    // ── CRAB WALK ─────────────────────────────────────────────────────────────
+    crab_state.walk_tick++;
+    if (crab_state.walk_tick >= 8) {
+        crab_state.walk_tick  = 0;
+        crab_state.walk_frame ^= 1;
+    }
+
+    if (crab_state.blinking) {
+        if (crab_state.blink_cd > 0) crab_state.blink_cd--;
+        if (crab_state.blink_cd == 0) {
+            crab_state.blinking = false;
+            crab_state.blink_cd = (uint16_t)random(100, 220);
+        }
+    } else {
+        if (crab_state.blink_cd > 0) crab_state.blink_cd--;
+        else { crab_state.blinking = true; crab_state.blink_cd = 3; }
+    }
+
+    bool celebrating = false;
+    if (crab_state.celebrate_fr > 0) {
+        crab_state.celebrate_fr--;
+        celebrating = true;
+    } else if (crab_state.celebrate_cd > 0) {
+        crab_state.celebrate_cd--;
+    } else {
+        crab_state.celebrate_fr = 24;
+        crab_state.celebrate_cd = (uint16_t)random(160, 240);
+    }
+
+    int ocx = (int)crab_state.x;
+    int ocy = PIT_FLOOR_Y - 8;
+    int ox1, oy1, ox2, oy2;
+    crab_bbox_at(ocx, ocy, &ox1, &oy1, &ox2, &oy2);
+    // Expand bbox to include pinstripes and order ticket
+    ox1 -= 2; ox2 += 10; oy1 -= 6;
+
+    crab_state.x += crab_state.vx;
+    if (crab_state.x < 48.0f) {
+        crab_state.vx = fabsf(crab_state.vx); crab_state.right = true;
+    }
+    if (crab_state.x > (float)(SCR_W - 48)) {
+        crab_state.vx = -fabsf(crab_state.vx); crab_state.right = false;
+    }
+
+    int ncx = (int)crab_state.x;
+    int ncy = PIT_FLOOR_Y - 8;
+    int nx1, ny1, nx2, ny2;
+    crab_bbox_at(ncx, ncy, &nx1, &ny1, &nx2, &ny2);
+    nx1 -= 2; nx2 += 10; ny1 -= 6;
+
+    bg_restore((ox1 < nx1 ? ox1 : nx1), (oy1 < ny1 ? oy1 : ny1),
+               (ox2 > nx2 ? ox2 : nx2), (oy2 > ny2 ? oy2 : ny2));
+
+    draw_crab(anim_canvas, ncx, ncy,
+              lv_color_hex(s_anim_bull), lv_color_hex(s_anim_bear),
+              crab_state.blinking, crab_state.walk_frame, celebrating);
+    draw_pinstripes(anim_canvas, ncx, ncy);
+
+    // ── ORDER TICKET WOBBLE ───────────────────────────────────────────────────
+    // 6×4 Pearl rect wobbling above right claw tip
+    pit_ticket_tick++;
+    if (pit_ticket_tick >= 4) {
+        pit_ticket_tick = 0;
+        pit_ticket_flip = (pit_ticket_flip == 0) ? 1 : 0;
+    }
+    int tx = ncx + 20;   // right claw tip x offset
+    int ty = ncy - 18 + pit_ticket_flip;
+    if (tx >= 0 && tx + 6 < SCR_W && ty >= 0 && ty + 4 < SCR_H) {
+        lv_draw_rect_dsc_t td;
+        lv_draw_rect_dsc_init(&td);
+        td.radius = 0; td.border_width = 0;
+        td.bg_color = lv_color_hex(0xE6E9EF);
+        td.bg_opa   = LV_OPA_COVER;
+        lv_canvas_draw_rect(anim_canvas, tx, ty, 6, 4, &td);
+    }
+
+    lv_obj_invalidate(anim_canvas);
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
 // COUNTDOWN CLOCK
 // ══════════════════════════════════════════════════════════════════════════════
 #define CD_CRAB_H 50   // pixel height of the crab canvas strip at screen bottom
 
 static lv_obj_t*   cd_scr         = nullptr;
-static lv_obj_t*   cd_lbl_time    = nullptr;
+static lv_obj_t*   cd_lbl_clock   = nullptr;   // current local time (big)
+static lv_obj_t*   cd_lbl_date    = nullptr;   // date line
+static lv_obj_t*   cd_lbl_time    = nullptr;   // countdown digits
 static lv_obj_t*   cd_crab_canvas = nullptr;
 static lv_color_t* cd_crab_buf    = nullptr;
 static lv_timer_t* cd_crab_timer  = nullptr;
@@ -1000,8 +1562,8 @@ static void countdown_crab_cb(lv_timer_t*) {
         else { crab_state.blinking = true; crab_state.blink_cd = 3; }
     }
 
-    // Fixed y within the 50px canvas: shell center sits 20px from bottom
-    const int cy = CD_CRAB_H - 20;
+    // Fixed y within the 50px canvas: shell center sits 23px from bottom
+    const int cy = CD_CRAB_H - 23;
 
     // Old bbox (before move)
     int ocx = (int)crab_state.x;
@@ -1039,23 +1601,40 @@ static void countdown_build() {
     cd_scr = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(cd_scr, lv_color_hex(0x0E1117), LV_PART_MAIN);
 
-    lv_obj_t* title = lv_label_create(cd_scr);
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_18, LV_PART_MAIN);
-    lv_obj_set_style_text_color(title, lv_color_hex(0x7A8290), LV_PART_MAIN);
-    lv_label_set_text(title, "Market opens in");
-    lv_obj_align(title, LV_ALIGN_CENTER, 0, -64);
+    // Large current-time clock (dominant element, top section)
+    cd_lbl_clock = lv_label_create(cd_scr);
+    lv_obj_set_style_text_font(cd_lbl_clock, &lv_font_montserrat_48, LV_PART_MAIN);
+    lv_obj_set_style_text_color(cd_lbl_clock, lv_color_hex(0xE6E9EF), LV_PART_MAIN);
+    lv_label_set_text(cd_lbl_clock, "--:--:--");
+    lv_obj_align(cd_lbl_clock, LV_ALIGN_TOP_MID, 0, 45);
 
+    // Date line below the clock
+    cd_lbl_date = lv_label_create(cd_scr);
+    lv_obj_set_style_text_font(cd_lbl_date, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_color(cd_lbl_date, lv_color_hex(0x7A8290), LV_PART_MAIN);
+    lv_label_set_text(cd_lbl_date, "---");
+    lv_obj_align(cd_lbl_date, LV_ALIGN_TOP_MID, 0, 109);
+
+    // "Market opens in" subtitle
+    lv_obj_t* sub = lv_label_create(cd_scr);
+    lv_obj_set_style_text_font(sub, &lv_font_montserrat_16, LV_PART_MAIN);
+    lv_obj_set_style_text_color(sub, lv_color_hex(0x7A8290), LV_PART_MAIN);
+    lv_label_set_text(sub, "Market opens in");
+    lv_obj_align(sub, LV_ALIGN_TOP_MID, 0, 143);
+
+    // Countdown digits — smaller than the clock, shifts color as open approaches
     cd_lbl_time = lv_label_create(cd_scr);
-    lv_obj_set_style_text_font(cd_lbl_time, &lv_font_montserrat_48, LV_PART_MAIN);
+    lv_obj_set_style_text_font(cd_lbl_time, &lv_font_montserrat_28, LV_PART_MAIN);
     lv_obj_set_style_text_color(cd_lbl_time, lv_color_hex(0xE6E9EF), LV_PART_MAIN);
     lv_label_set_text(cd_lbl_time, "--:--:--");
-    lv_obj_align(cd_lbl_time, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_align(cd_lbl_time, LV_ALIGN_TOP_MID, 0, 173);
 
-    lv_obj_t* sub = lv_label_create(cd_scr);
-    lv_obj_set_style_text_font(sub, &lv_font_montserrat_14, LV_PART_MAIN);
-    lv_obj_set_style_text_color(sub, lv_color_hex(0x22C55E), LV_PART_MAIN);
-    lv_label_set_text(sub, "NYSE / NASDAQ   9:30 AM ET");
-    lv_obj_align(sub, LV_ALIGN_CENTER, 0, 64);
+    // Market label below countdown
+    lv_obj_t* mkt = lv_label_create(cd_scr);
+    lv_obj_set_style_text_font(mkt, &lv_font_montserrat_12, LV_PART_MAIN);
+    lv_obj_set_style_text_color(mkt, lv_color_hex(0x22C55E), LV_PART_MAIN);
+    lv_label_set_text(mkt, "NYSE / NASDAQ  9:30 AM ET");
+    lv_obj_align(mkt, LV_ALIGN_TOP_MID, 0, 221);
 
     // Crab walk canvas strip at the bottom of the screen
     cd_crab_buf = (lv_color_t*)heap_caps_malloc(
@@ -1085,6 +1664,34 @@ static void countdown_build() {
 static void countdown_tick_cb(lv_timer_t*) {
     if (!cd_lbl_time) return;
     wdt_feed();
+
+    // ── Current clock + date (user's timezone via configTzTime already applied)
+    time_t now_t = time(nullptr);
+    struct tm lt;
+    localtime_r(&now_t, &lt);
+
+    if (lt.tm_year > 100) {   // NTP synced: year > 2000
+        char clock_buf[12];
+        snprintf(clock_buf, sizeof(clock_buf), "%02d:%02d:%02d",
+                 lt.tm_hour, lt.tm_min, lt.tm_sec);
+        if (cd_lbl_clock) lv_label_set_text(cd_lbl_clock, clock_buf);
+
+        if (cd_lbl_date) {
+            char date_buf[20];
+            // strftime would need locale; use manual day/month arrays instead
+            static const char* const WDAY[7] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
+            static const char* const MON[12] = {"Jan","Feb","Mar","Apr","May","Jun",
+                                                 "Jul","Aug","Sep","Oct","Nov","Dec"};
+            snprintf(date_buf, sizeof(date_buf), "%s, %s %d",
+                     WDAY[lt.tm_wday], MON[lt.tm_mon], lt.tm_mday);
+            lv_label_set_text(cd_lbl_date, date_buf);
+        }
+    } else {
+        if (cd_lbl_clock) lv_label_set_text(cd_lbl_clock, "--:--:--");
+        if (cd_lbl_date)  lv_label_set_text(cd_lbl_date,  "---");
+    }
+
+    // ── Countdown (decrement every second)
     if (countdown > 0) countdown--;
     uint32_t s  = countdown;
     uint32_t h  = s / 3600;
@@ -1094,7 +1701,7 @@ static void countdown_tick_cb(lv_timer_t*) {
     snprintf(buf, sizeof(buf), "%02u:%02u:%02u", h, m, sc);
     lv_label_set_text(cd_lbl_time, buf);
 
-    // Digit color shifts from Pearl → Sand Amber → Bull Green as open approaches
+    // Digit color shifts Pearl → Sand Amber → Bull Green as open approaches
     lv_color_t digit_col;
     if (s > 1800)      digit_col = lv_color_hex(0xE6E9EF);  // Pearl: >30 min
     else if (s > 300)  digit_col = lv_color_hex(0xF59E0B);  // Sand Amber: 5-30 min
@@ -1163,6 +1770,26 @@ void anim_start(int type, uint32_t secs_to_open) {
             anim_timer = lv_timer_create(reef_timer_cb, 120, nullptr);
             break;
 
+        case ANIM_PIXELBEACH:
+            anim_bg = (lv_color_t*)heap_caps_malloc(
+                (size_t)SCR_W * SCR_H * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
+            pixbeach_bg_render();
+            if (anim_bg)
+                memcpy(anim_buf, anim_bg, (size_t)SCR_W * SCR_H * sizeof(lv_color_t));
+            pixbeach_init();
+            anim_timer = lv_timer_create(pixbeach_timer_cb, 120, nullptr);
+            break;
+
+        case ANIM_MARKETPIT:
+            anim_bg = (lv_color_t*)heap_caps_malloc(
+                (size_t)SCR_W * SCR_H * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
+            pit_bg_render();
+            if (anim_bg)
+                memcpy(anim_buf, anim_bg, (size_t)SCR_W * SCR_H * sizeof(lv_color_t));
+            pit_init();
+            anim_timer = lv_timer_create(pit_timer_cb, 120, nullptr);
+            break;
+
         default:
             star_init();
             star_draw();
@@ -1189,6 +1816,8 @@ void anim_stop() {
 
     if (cur_type == ANIM_COUNTDOWN) {
         if (cd_scr) { lv_obj_del(cd_scr); cd_scr = nullptr; }
+        cd_lbl_clock   = nullptr;
+        cd_lbl_date    = nullptr;
         cd_lbl_time    = nullptr;
         cd_crab_canvas = nullptr;   // child of cd_scr, deleted above
         if (cd_crab_buf) { heap_caps_free(cd_crab_buf); cd_crab_buf = nullptr; }
