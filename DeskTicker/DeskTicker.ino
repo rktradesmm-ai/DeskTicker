@@ -233,6 +233,54 @@ static void hide_connecting() {
     LV_UNLOCK();
 }
 
+// ── US Eastern time helpers ───────────────────────────────────────────────────
+// NYSE open/close is always defined in ET. These helpers let is_after_hours()
+// and secs_to_market_open() work correctly regardless of the user's tz_offset.
+
+// Returns true when UTC time t is in US EDT (UTC-4) rather than EST (UTC-5).
+// Post-2007 rules: 2nd Sunday of March 2am EST → 1st Sunday of November 2am EDT.
+static bool is_us_dst(time_t t) {
+    struct tm u; gmtime_r(&t, &u);
+    int month = u.tm_mon + 1;
+    if (month < 3 || month > 11) return false;
+    if (month > 3 && month < 11) return true;
+    // Find day-of-month of the relevant Sunday cutover.
+    struct tm probe = {};
+    probe.tm_year = u.tm_year;
+    probe.tm_mon  = u.tm_mon;
+    probe.tm_mday = 1;
+    mktime(&probe);                              // populates tm_wday for the 1st
+    int first_sun     = 1 + ((7 - probe.tm_wday) % 7);
+    int cutover_day   = (month == 3) ? first_sun + 7 : first_sun;
+    int cutover_utc_h = (month == 3) ? 7 : 6;   // 2am EST=7 UTC, 2am EDT=6 UTC
+    if (u.tm_mday < cutover_day) return (month == 11);
+    if (u.tm_mday > cutover_day) return (month == 3);
+    return (month == 3) ? (u.tm_hour >= cutover_utc_h)
+                        : (u.tm_hour <  cutover_utc_h);
+}
+
+// Fill *out with the US Eastern wall clock for UTC time t.
+static void et_localtime(time_t t, struct tm* out) {
+    time_t et = t - (time_t)(is_us_dst(t) ? 4 : 5) * 3600;
+    gmtime_r(&et, out);
+}
+
+// Convert a struct tm treated as a wall-clock ET time to a UTC time_t.
+// (ESP32 Arduino core has no timegm/mkgmtime, so we compute it directly.)
+static time_t et_to_utc(const struct tm* et_tm, bool dst) {
+    // Accumulate days since 1970-01-01 UTC.
+    static const int mdays[] = {0,31,59,90,120,151,181,212,243,273,304,334};
+    int y = et_tm->tm_year + 1900;
+    int days = (y - 1970) * 365 + (y - 1969) / 4
+             - (y - 1901) / 100 + (y - 1601) / 400
+             + mdays[et_tm->tm_mon] + (et_tm->tm_mday - 1);
+    bool leap = ((y % 4 == 0 && y % 100 != 0) || y % 400 == 0);
+    if (leap && et_tm->tm_mon >= 2) days++;
+    time_t utc_naive = (time_t)days * 86400
+                     + et_tm->tm_hour * 3600 + et_tm->tm_min * 60 + et_tm->tm_sec;
+    return utc_naive + (time_t)(dst ? 4 : 5) * 3600;
+}
+
 // ── After-hours detection ─────────────────────────────────────────────────────
 static bool is_after_hours(int idx) {
     if (idx < 0 || idx >= cfg.asset_count) return false;
@@ -241,16 +289,16 @@ static bool is_after_hours(int idx) {
     if (!def) return false;
     if (def->market == MARKET_CRYPTO || def->market == MARKET_COMMODITY) return false;  // 24/7 markets
 
-    // Compute local time once if NTP is available
+    // Compute US Eastern time (NYSE is always ET regardless of user's tz_offset).
     int wday = -1, mins = -1;
     if (ntp_synced) {
         time_t now_t = time(nullptr);
-        struct tm lt;
-        localtime_r(&now_t, &lt);
-        wday = lt.tm_wday;
-        mins = lt.tm_hour * 60 + lt.tm_min;
+        struct tm et;
+        et_localtime(now_t, &et);
+        wday = et.tm_wday;
+        mins = et.tm_hour * 60 + et.tm_min;
 
-        // During regular market hours (Mon–Fri 09:30–16:00) always show the chart.
+        // During regular NYSE hours (Mon–Fri 09:30–16:00 ET) always show the chart.
         // This overrides any incorrect "CLOSED" the YF API sometimes returns for
         // stocks/ETFs during an active session (a known Yahoo Finance quirk).
         if (wday >= 1 && wday <= 5 && mins >= 9*60+30 && mins < 16*60)
@@ -267,10 +315,10 @@ static bool is_after_hours(int idx) {
                 d->market_state == MSTATE_PRE);
     }
 
-    // No valid API data: fall back to local time
+    // No valid API data: fall back to ET time
     if (wday < 0) return false;             // no NTP — assume open
-    if (wday == 0 || wday == 6)          return true;   // weekend
-    if (mins < 9*60+30 || mins >= 16*60) return true;   // outside session
+    if (wday == 0 || wday == 6)          return true;   // weekend in ET
+    if (mins < 9*60+30 || mins >= 16*60) return true;   // outside ET session
     return false;
 }
 
@@ -278,25 +326,31 @@ static bool is_after_hours(int idx) {
 static uint32_t secs_to_market_open() {
     if (!ntp_synced) return 3600;  // fallback 1h
 
-    struct tm lt;
     time_t now = time(nullptr);
-    localtime_r(&now, &lt);
+    struct tm et_now;
+    et_localtime(now, &et_now);
 
-    // Target: 9:30 AM ET
-    struct tm target = lt;
-    target.tm_hour   = 9;
-    target.tm_min    = 30;
-    target.tm_sec    = 0;
-    time_t t_open    = mktime(&target);
+    // Target: 9:30 AM ET on today's ET date.
+    struct tm target = et_now;
+    target.tm_hour = 9;
+    target.tm_min  = 30;
+    target.tm_sec  = 0;
+    time_t t_open  = et_to_utc(&target, is_us_dst(now));
 
-    if (t_open <= now) t_open += 86400;  // push to tomorrow
+    if (t_open <= now) {
+        // Already past 9:30 ET today — move to the next calendar day in ET.
+        target.tm_mday += 1;
+        // Advance by one ET day (use tomorrow's UTC midnight to check DST).
+        time_t tomorrow = t_open + 86400;
+        t_open = et_to_utc(&target, is_us_dst(tomorrow));
+    }
 
-    // Skip weekends
-    struct tm tgt_tm;
-    localtime_r(&t_open, &tgt_tm);
-    while (tgt_tm.tm_wday == 0 || tgt_tm.tm_wday == 6) {  // Sun=0 Sat=6
+    // Skip weekends in ET.
+    struct tm tgt_et;
+    et_localtime(t_open, &tgt_et);
+    while (tgt_et.tm_wday == 0 || tgt_et.tm_wday == 6) {
         t_open += 86400;
-        localtime_r(&t_open, &tgt_tm);
+        et_localtime(t_open, &tgt_et);
     }
 
     int diff = (int)(t_open - now);
