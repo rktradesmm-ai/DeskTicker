@@ -238,7 +238,8 @@ static bool is_after_hours(int idx) {
     if (idx < 0 || idx >= cfg.asset_count) return false;
 
     const AssetDef* def = asset_find(cfg.assets[idx]);
-    if (!def || def->market == MARKET_CRYPTO) return false;  // crypto never sleeps
+    if (!def) return false;
+    if (def->market == MARKET_CRYPTO || def->market == MARKET_COMMODITY) return false;  // 24/7 markets
 
     // Compute local time once if NTP is available
     int wday = -1, mins = -1;
