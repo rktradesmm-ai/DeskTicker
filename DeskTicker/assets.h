@@ -81,7 +81,7 @@ static const AssetDef ASSETS[TOTAL_ASSETS] = {
     {"USD/JPY","USD/JPY",       "JPY=X",     MARKET_FOREX,     3, 0},
     {"EUR/USD","EUR/USD",       "EURUSD=X",  MARKET_FOREX,     4, 0},
     {"GBP/USD","GBP/USD",       "GBPUSD=X",  MARKET_FOREX,     4, 0},
-    {"DXY",   "US Dollar Idx", "DX-Y.NYB",  MARKET_FOREX,     3, 0},
+    {"DXY",    "US Dollar Idx", "DX-Y.NYB",  MARKET_FOREX,     3, 0},
 };
 
 inline const AssetDef* asset_find(const char* symbol) {
