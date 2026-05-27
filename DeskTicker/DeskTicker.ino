@@ -180,7 +180,7 @@ static void show_splash() {
         // claws hanging down naturally toward the D (left/green) and T (right/red).
         // Wordmark center at (SCR_W/2, SCR_H/2 + 18) = (240, 178), ~40 px tall.
         // Crab cy=142 places its lowest legs ~6 px above the wordmark top edge.
-        anim_draw_crab(cvs, SCR_W / 2, 136,
+        anim_draw_crab(cvs, SCR_W / 2, 128,
                        cfg.bull_rgb, cfg.bear_rgb,
                        /*blink=*/false, /*walk_frame=*/0, /*claws_raised=*/false);
     } else {
@@ -189,7 +189,7 @@ static void show_splash() {
     }
 
     // Wordmark and tagline are LVGL widgets — they don't trigger an extra flush.
-    if (splash_buf) splash_add_wordmark(scr, 18, 56);
+    if (splash_buf) splash_add_wordmark(scr, 10, 48);
 
     lv_scr_load(scr);           // single full-screen flush, no separate invalidate
     queue_scr_for_delete(scr);

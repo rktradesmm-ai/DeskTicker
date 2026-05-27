@@ -19,7 +19,7 @@ void settings_defaults(Settings* s) {
     s->cycle_secs       = 30;
     s->after_anim       = ANIM_AQUARIUM;
     s->tz_offset        = 0;
-    s->brightness       = 100;
+    s->brightness       = 70;
     s->wifi_ok          = false;
 }
 
@@ -66,7 +66,7 @@ void settings_load(Settings* s) {
     s->cycle_secs = prefs.getInt("cycle",    30);
     s->after_anim  = prefs.getInt("anim",       ANIM_AQUARIUM);
     s->tz_offset   = prefs.getInt("tz",         0);
-    s->brightness  = prefs.getInt("brightness", 100);
+    s->brightness  = prefs.getInt("brightness", 70);
     if (s->brightness < 10)  s->brightness = 10;
     if (s->brightness > 100) s->brightness = 100;
     prefs.end();
