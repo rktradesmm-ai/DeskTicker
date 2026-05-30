@@ -496,6 +496,20 @@ void setup() {
     bsp_display_backlight_on();
     Serial.println("[setup] backlight on");
 
+    // Arm the always-on render-task liveness watchdog now that the display (and its
+    // render task) is up. It protects every screen — including the live chart, which
+    // previously had no watchdog at all. Create its feed lv_timer under the LVGL lock.
+    if (LV_LOCK()) { render_wdt_init(); LV_UNLOCK(); }
+    // If the previous boot was a watchdog reboot, report it so a chart hang is visible
+    // and its timing measurable on the serial monitor.
+    WdtReboot wr;
+    if (render_wdt_consume_last_reboot(&wr)) {
+        Serial.printf("[WDT] previous boot ended in a render-watchdog reboot: "
+                      "state=%u freeHeap=%u freePSRAM=%u atEpoch=%lu\n",
+                      wr.last_state, wr.free_heap, wr.free_psram,
+                      (unsigned long)wr.reboot_epoch);
+    }
+
     pinMode(RESET_BTN_GPIO, INPUT_PULLUP);
 
     // Load settings from NVS
@@ -538,6 +552,23 @@ void loop() {
         }
     } else {
         btn_held_since = 0;
+    }
+
+    // Tell the render watchdog which state we're in (logged if it has to reboot), and
+    // emit a periodic health line so a hang or a slow memory leak is visible on serial.
+    render_wdt_set_context((uint8_t)state);
+    static unsigned long last_health_ms = 0;
+    static uint32_t      last_hb        = 0;
+    if (millis() - last_health_ms >= 60000) {
+        last_health_ms = millis();
+        uint32_t hb = render_wdt_heartbeat();
+        Serial.printf("[health] state=%d freeHeap=%u freePSRAM=%u largestPSRAM=%u "
+                      "renderHB=%u (+%u/min)\n",
+                      (int)state, (unsigned)ESP.getFreeHeap(),
+                      (unsigned)ESP.getFreePsram(),
+                      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM),
+                      (unsigned)hb, (unsigned)(hb - last_hb));
+        last_hb = hb;
     }
 
     switch (state) {

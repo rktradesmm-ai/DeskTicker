@@ -6,19 +6,47 @@
 #include "animations.h"
 #include "chart_screen.h"  // SCR_W, SCR_H
 #include "esp_timer.h"
+#include <time.h>          // time() for the watchdog reboot timestamp
 
-// ── Animation watchdog ────────────────────────────────────────────────────────
+// ── Render-task liveness watchdog (always-on) ─────────────────────────────────
 // Independent hardware timer (esp_timer, NOT an LVGL timer) that reboots the
-// device if no animation frame fires for 30 seconds. Because it runs via the
-// esp_timer task — not the LVGL render task — it fires even when LVGL is
-// frozen in a QSPI DMA semaphore wait (the silent-deadlock pattern seen during
-// long animation runs). Each timer callback feeds it; anim_start arms it;
-// anim_stop disarms it before tearing down LVGL objects.
-static esp_timer_handle_t s_wdt = nullptr;
+// device if the LVGL render task stops producing frames for 30 seconds. Because it
+// runs via the esp_timer task — not the LVGL render task — it fires even when LVGL
+// is frozen in a QSPI DMA / tearing-effect semaphore wait (the silent display
+// deadlock documented in BISECT_LOG.md).
+//
+// It is ALWAYS ON for the whole runtime: render_wdt_init() arms it once and starts
+// a global feed lv_timer (render_feed_cb) that runs inside lv_timer_handler(), i.e.
+// in the render task. So it protects EVERY screen — live chart, connecting, settings
+// AND after-hours animation — not just the animation as before. If the render task
+// deadlocks, lv_timer_handler() stops cycling, the feed stops, and the device
+// reboots. Main-loop blocking (e.g. a 30 s HTTP fetch) never false-fires it, because
+// the render task keeps feeding independently. The animation timer callbacks also
+// call wdt_feed() — now harmless extra feeds of the same global watchdog.
+static esp_timer_handle_t s_wdt        = nullptr;
+static lv_timer_t*        s_feed_timer = nullptr;
+static volatile uint32_t  s_heartbeat  = 0;     // ++ each render feed; flat => render stalled
+static volatile uint8_t   s_last_state = 0xFF;  // last main-loop State, for crash logging
+
+// Survives a software reset (esp_restart) so the NEXT boot can report that the
+// previous boot ended in a render-watchdog reboot, and what the device was doing
+// when it hung. RTC RAM is preserved across esp_restart, zeroed on power-on.
+#define WDT_MAGIC 0xDEADBE01u
+RTC_DATA_ATTR static WdtReboot s_reboot_mark;
 
 static void wdt_fire(void*) {
-    // No animation frame in 30 s — LVGL render task is deadlocked. Reboot.
-    Serial.println("[WDT] Animation watchdog: no frame in 30s, rebooting");
+    // No render frame in 30 s — the LVGL render task is deadlocked. Record what the
+    // device was doing so the NEXT boot can report it (RTC RAM survives esp_restart),
+    // then reboot.
+    s_reboot_mark.magic        = WDT_MAGIC;
+    s_reboot_mark.last_state   = s_last_state;
+    s_reboot_mark.free_heap    = (uint32_t)ESP.getFreeHeap();
+    s_reboot_mark.free_psram   = (uint32_t)ESP.getFreePsram();
+    s_reboot_mark.reboot_epoch = (uint32_t)time(nullptr);
+    Serial.printf("[WDT] render watchdog: no frame in 30s, rebooting "
+                  "(state=%u heap=%u psram=%u hb=%u)\n",
+                  s_last_state, s_reboot_mark.free_heap,
+                  s_reboot_mark.free_psram, s_heartbeat);
     Serial.flush();
     esp_restart();
 }
@@ -34,13 +62,6 @@ static void wdt_start() {
     };
     if (esp_timer_create(&args, &s_wdt) == ESP_OK)
         esp_timer_start_once(s_wdt, 30ULL * 1000 * 1000); // 30 s in µs
-}
-
-static void wdt_stop() {
-    if (!s_wdt) return;
-    esp_timer_stop(s_wdt);    // safe even if already fired
-    esp_timer_delete(s_wdt);
-    s_wdt = nullptr;
 }
 
 static void wdt_feed() {
@@ -1802,12 +1823,12 @@ void anim_start(int type, uint32_t secs_to_open) {
     anim_settings_req = 0;
     anim_tap_count    = 0;
     anim_last_tap_ms  = 0;
-    wdt_start();
     lv_scr_load(anim_scr);
 }
 
 void anim_stop() {
-    wdt_stop(); // disarm before any LVGL teardown — watchdog must not fire mid-cleanup
+    // The watchdog is now always-on (armed once in render_wdt_init); never stop it
+    // here — it must keep protecting whatever screen comes next, including the chart.
     anim_swipe        = 0;
     anim_settings_req = 0;
     anim_tap_count    = 0;
@@ -1849,4 +1870,44 @@ void anim_draw_crab(lv_obj_t* canvas, int cx, int cy,
     draw_crab(canvas, cx, cy,
               lv_color_hex(bull_rgb), lv_color_hex(bear_rgb),
               blink, walk_frame, claws_raised);
+}
+
+// ── Render-task liveness watchdog — public API ────────────────────────────────
+
+// LVGL timer callback. Runs inside lv_timer_handler() (the render task), so each
+// call proves that task is alive and producing frames. Bumps the heartbeat counter
+// and feeds the hardware watchdog. If the render task deadlocks, this stops firing
+// and the watchdog reboots the device ~30 s later.
+static void render_feed_cb(lv_timer_t*) {
+    s_heartbeat++;
+    wdt_feed();
+}
+
+// Arm the always-on watchdog and start its 1 s feed timer. Call once from setup(),
+// under LV_LOCK, after bsp_display_start() (the render task must already exist).
+void render_wdt_init() {
+    wdt_start();                                   // arm the 30 s esp_timer (idempotent)
+    if (!s_feed_timer)
+        s_feed_timer = lv_timer_create(render_feed_cb, 1000, nullptr);  // feed every 1 s
+    Serial.println("[WDT] render watchdog armed (always-on, 30s)");
+}
+
+// Record the current main-loop State so a watchdog reboot can log where it hung.
+void render_wdt_set_context(uint8_t state_code) {
+    s_last_state = state_code;
+}
+
+// Render-task heartbeat (increments ~1/s while the render task is alive). A flat
+// value across a health interval means the render task is stalling.
+uint32_t render_wdt_heartbeat() {
+    return s_heartbeat;
+}
+
+// If the previous boot ended in a watchdog reboot, copy the recorded details into
+// *out, clear the marker, and return true. Call once early in setup().
+bool render_wdt_consume_last_reboot(WdtReboot* out) {
+    if (s_reboot_mark.magic != WDT_MAGIC) return false;
+    if (out) *out = s_reboot_mark;
+    s_reboot_mark.magic = 0;
+    return true;
 }

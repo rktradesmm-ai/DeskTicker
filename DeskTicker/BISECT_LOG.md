@@ -53,6 +53,8 @@ Added an `esp_timer`-based hardware watchdog with a 30-second timeout.
 - `wdt_start()` is called in `anim_start()`; `wdt_stop()` is called in `anim_stop()`.
 - If an animation freezes and stops calling `wdt_feed()`, the device auto-reboots within 30 s.
 - Watchdog does not run during chart / connecting / settings screens (only after-hours).
+  **SUPERSEDED 2026-05-30** — the watchdog is now always-on and covers every screen,
+  including the live chart. See "Chart-screen watchdog gap fixed" below.
 
 ### Partial refresh — REVERTED — permanent incompatibility (tag `v2.x`)
 Tested `full_refresh = 0` in `lv_port.c`. Result: immediate, severe garbled output —
@@ -118,6 +120,53 @@ Combined picture so far on core 3.0.7:
 
 ---
 
+## Chart-screen watchdog gap fixed — 2026-05-30 (branch `fix/chart-hang-watchdog`)
+
+**Finding:** the live chart had NO watchdog. The 30 s `esp_timer` watchdog was armed
+only by `anim_start()` and torn down by `anim_stop()`, so it ran **only during the
+after-hours animation**. When the chart screen hit the silent display deadlock, nothing
+rebooted the device — it stayed frozen indefinitely (which is why the chart hang window
+was never measurable: no reboot signalled it). The 16 h chart soak (2026-05-24) passed
+only because the hang is rare on core 3.0.7, not because anything would have recovered it.
+
+**Fix:** the watchdog is now a single **always-on render-task-liveness watchdog**:
+- `render_wdt_init()` (called once in `setup()` after `bsp_display_start()`) arms the
+  30 s timer and creates ONE global feed `lv_timer` (`render_feed_cb`, 1 s period).
+- The feed timer runs inside `lv_timer_handler()` (the LVGL render task), so it keeps
+  feeding on EVERY screen — chart, connecting, settings AND animation. If the render
+  task deadlocks (the documented QSPI/TE freeze), `lv_timer_handler()` stops cycling,
+  the feed stops, and the device reboots in ≤30 s.
+- It is immune to main-loop blocking: a 30 s HTTP fetch never false-fires it, because
+  the render task feeds independently of the main loop.
+- `anim_start()`/`anim_stop()` no longer arm/disarm the watchdog. The per-animation
+  `wdt_feed()` calls remain as harmless redundant feeds. `wdt_stop()` was deleted (the
+  watchdog must never be stopped now).
+- **This also closes the 2026-05-23 soak caveat** (the after-hours watchdog used to
+  reset every 5 min via `anim_stop()`/`anim_start()` and "was never under pressure to
+  fire"). The always-on watchdog now runs continuously across those poll cycles.
+
+**Diagnostics added (so the next hang is captured with evidence):**
+- An `RTC_DATA_ATTR` marker is written in `wdt_fire()` before reboot (last state, free
+  heap/PSRAM, reboot epoch). On the next boot `setup()` reads it via
+  `render_wdt_consume_last_reboot()` and prints
+  `[WDT] previous boot ended in a render-watchdog reboot: state=… freeHeap=… atEpoch=…`.
+  This is how the chart hang window is now measured: note boot time, watch for this
+  line, `atEpoch` tells you when it hung.
+- A `[health]` line every 60 s in `loop()`: free heap, free PSRAM, largest free PSRAM
+  block, current state, and the render heartbeat (`renderHB (+N/min)`). A flat
+  heartbeat = the render task is stalling; a falling heap/PSRAM trend = a slow leak.
+
+**Not changed (per decision):** the vendor `portMAX_DELAY` semaphore waits in
+`lv_port.c`/`esp_bsp.c` were left at stock — recovery is by reboot, not self-heal. Core
+stays 3.0.7; `full_refresh` stays 1. The state-machine `State` enum order is what the
+`state=` numbers in the logs refer to (S_INIT=0, S_WIFI_SETUP=1, S_CONNECTING=2,
+S_NTP_SYNC=3, S_FETCH=4, S_CHART=5, S_AFTER_HOURS=6, S_RECONNECT=7, S_SETTINGS=8).
+
+**Still needs:** on-device verification on core 3.0.7 — confirm the boot banner
+`[WDT] render watchdog armed (always-on, 30s)`, the 60 s `[health]` line with a rising
+heartbeat, and (simulated) that forcing a render stall triggers a reboot whose next boot
+prints the "previous boot…" line.
+
 ## Known separate bugs (not hang-related)
 - **QQQ/commodities unavailable during US market hours:** Likely caused
   by UTC+8 timezone setting shifting the market-hours check by ~12 h.
@@ -151,9 +200,13 @@ net.
    This is what keeps the 30 s hardware watchdog alive. If a new animation has a
    callback that runs less often than that, add a separate `lv_timer` whose only job
    is to feed the watchdog.
-4. **`anim_start()` must call `wdt_start()`. `anim_stop()` must call `wdt_stop()`.**
-   The existing helpers handle this. New animations should be plumbed into the same
-   start/stop path, not bypass it.
+4. ~~**`anim_start()` must call `wdt_start()`. `anim_stop()` must call `wdt_stop()`.**~~
+   **OBSOLETE since 2026-05-30.** The watchdog is now always-on (armed once in
+   `render_wdt_init()` from `setup()`) and is fed by a global render-task `lv_timer`,
+   not by per-animation arming. New animations need do nothing for watchdog coverage —
+   they are protected automatically. Do NOT call `wdt_start()`/`wdt_stop()` from an
+   animation (the latter no longer exists). Keeping `wdt_feed()` in a timer callback is
+   fine but redundant.
 
 ### If a new animation reintroduces a hang
 
