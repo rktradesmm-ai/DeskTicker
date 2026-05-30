@@ -1746,7 +1746,6 @@ void anim_start(int type, uint32_t secs_to_open) {
         anim_last_tap_ms  = 0;
         anim_timer      = lv_timer_create(countdown_tick_cb,  1000, nullptr);
         cd_crab_timer   = lv_timer_create(countdown_crab_cb,  120,  nullptr);
-        wdt_start();
         return;
     }
 

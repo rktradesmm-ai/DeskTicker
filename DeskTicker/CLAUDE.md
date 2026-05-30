@@ -301,9 +301,19 @@ before `anim_start()`). The main loop calls `anim_set_candle_colors(cfg.bull_rgb
 each time it enters `S_AFTER_HOURS`.
 
 **After-hours poll interval:** `S_AFTER_HOURS` re-checks market hours every **5 minutes**
-(`300000UL` ms). Each re-check calls `anim_stop()` → `S_FETCH` → `anim_start()`, which also
-resets the 30-second hardware watchdog. The animation never runs continuously for more than
-~5 minutes. A true long-duration soak test requires temporarily extending this interval.
+(`300000UL` ms). Each re-check calls `anim_stop()` → `S_FETCH` → `anim_start()`, so the
+animation screen itself is rebuilt every ~5 minutes.
+
+**Render watchdog (always-on):** a 30-second `esp_timer` reboots the device if the LVGL
+render task stops producing frames — the silent QSPI / tearing-effect display deadlock (see
+`BISECT_LOG.md`). It is armed once by `render_wdt_init()` in `setup()` (after
+`bsp_display_start()`, under `LV_LOCK`) and fed by a global render-task `lv_timer`
+(`render_feed_cb`, 1 s), so it now covers **every** screen including the live chart (was
+after-hours only before 2026-05-30). `anim_start`/`anim_stop` no longer touch it; never call
+`wdt_stop()` (removed — the watchdog must stay armed). On the next boot,
+`render_wdt_consume_last_reboot()` logs `[WDT] previous boot ended in a render-watchdog
+reboot…`; a `[health]` line every 60 s logs heap/PSRAM/heartbeat. Being always-on, it also
+retires the old "watchdog never runs >5 min" soak-test caveat.
 
 ---
 
