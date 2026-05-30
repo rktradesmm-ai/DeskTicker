@@ -297,6 +297,10 @@ static bool yf_try_host(const char* host, const char* ticker, const char* interv
     filter["chart"]["result"][0]["meta"]["previousClose"]      = true;
     filter["chart"]["result"][0]["meta"]["chartPreviousClose"] = true;
     filter["chart"]["result"][0]["meta"]["marketState"]        = true;
+    // Session metadata for per-asset-class market-hours detection (see is_after_hours).
+    filter["chart"]["result"][0]["meta"]["regularMarketTime"]  = true;
+    filter["chart"]["result"][0]["meta"]["currentTradingPeriod"]["regular"]["start"] = true;
+    filter["chart"]["result"][0]["meta"]["currentTradingPeriod"]["regular"]["end"]   = true;
     filter["chart"]["result"][0]["timestamp"]                  = true;
     filter["chart"]["result"][0]["indicators"]["quote"][0]["open"]   = true;
     filter["chart"]["result"][0]["indicators"]["quote"][0]["high"]   = true;
@@ -357,6 +361,15 @@ static bool yf_try_host(const char* host, const char* ticker, const char* interv
     else if (strcmp(ms, "PRE")     == 0) out->market_state = MSTATE_PRE;
     else if (strcmp(ms, "POST")    == 0) out->market_state = MSTATE_POST;
     else                                 out->market_state = MSTATE_CLOSED;
+
+    // Session window + last-trade time for per-asset-class market-hours detection.
+    // Yahoo no longer sends marketState in the chart API, so is_after_hours() relies
+    // on these: currentTradingPeriod.regular (precise per-exchange session for equities)
+    // and regularMarketTime (last trade — used to detect holidays for futures/forex).
+    out->reg_mkt_time = meta["regularMarketTime"] | 0UL;
+    JsonObject reg = meta["currentTradingPeriod"]["regular"];
+    out->reg_start = reg["start"] | 0UL;
+    out->reg_end   = reg["end"]   | 0UL;
 
     JsonArray ts    = result["timestamp"];
     JsonObject q    = result["indicators"]["quote"][0];

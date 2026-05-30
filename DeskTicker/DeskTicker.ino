@@ -46,6 +46,12 @@
 #define RECONNECT_SOFT_MS   5000     // per-attempt timeout ms (~15 s total soft window)
 #define NTP_SERVER        "pool.ntp.org"
 #define RESET_BTN_GPIO    0   // BOOT button on ESP32-S3 — hold 3 s to re-run setup
+// Forex/futures use local session math, but local time can't know about bank holidays.
+// On a holiday the market's last trade (regularMarketTime) goes stale. If the local
+// session says "open" but the last trade is older than this, treat it as closed
+// (holiday) → show the after-hours animation. 2 h is well above the ~15 min normal
+// staleness and the 1 h futures maintenance halt, and far below a ≥24 h holiday gap.
+#define HOLIDAY_STALE_SECS  (2 * 3600)
 
 // ── State machine ─────────────────────────────────────────────────────────────
 enum State {
@@ -281,15 +287,76 @@ static time_t et_to_utc(const struct tm* et_tm, bool dst) {
     return utc_naive + (time_t)(dst ? 4 : 5) * 3600;
 }
 
+// ── Per-asset-class local session helpers ─────────────────────────────────────
+// All helpers take US Eastern wall-clock wday (0=Sun..6=Sat) and mins (hour*60+min).
+// Used by is_after_hours() to apply the correct session floor for each class,
+// independently of Yahoo's marketState (which is unreliable for FX/futures).
+
+// FX (~24/5): live Sun 17:00 ET → Fri 17:00 ET.
+// Closed: Saturday all day, Sunday before 17:00, Friday at/after 17:00.
+static bool fx_session_open(int wday, int mins) {
+    if (wday == 6) return false;                // Saturday — always closed
+    if (wday == 0) return (mins >= 17 * 60);    // Sunday — opens at 17:00 ET
+    if (wday == 5) return (mins < 17 * 60);     // Friday — closes at 17:00 ET
+    return true;                                // Mon–Thu always in session
+}
+
+// CME Globex index futures (~23h/weekday): Sun 18:00 ET → Fri 17:00 ET,
+// with a daily maintenance halt Mon–Thu 17:00–18:00 ET.
+// Closed: Saturday, Sunday before 18:00, Friday at/after 17:00, and the daily halt.
+static bool futures_session_open(int wday, int mins) {
+    if (wday == 6) return false;                // Saturday — always closed
+    if (wday == 0) return (mins >= 18 * 60);    // Sunday — opens at 18:00 ET
+    if (wday == 5) return (mins < 17 * 60);     // Friday — closes at 17:00 ET
+    // Mon–Thu: open except the 17:00–18:00 daily maintenance halt
+    return !(mins >= 17 * 60 && mins < 18 * 60);
+}
+
+// Returns true if Yahoo's last-trade time for this asset is stale enough to mean the
+// market isn't actually trading right now (i.e. a bank holiday). Used for forex/futures,
+// whose local session math can't know about holidays. Safe only when d->valid.
+static bool last_trade_stale(const AssetData* d) {
+    if (!d->valid || d->reg_mkt_time == 0) return false;  // no data → can't tell
+    uint32_t now_s = (uint32_t)time(nullptr);
+    return (now_s > d->reg_mkt_time) &&
+           (now_s - d->reg_mkt_time > HOLIDAY_STALE_SECS);
+}
+
 // ── After-hours detection ─────────────────────────────────────────────────────
+// Returns true when the chart should be replaced by the after-hours animation.
+//
+// Yahoo's v8/finance/chart API no longer sends `marketState`, so detection is:
+//   Crypto / Commodity : always live (24/7) — short-circuit.
+//   Forex              : local FX session (Sun 17:00 → Fri 17:00 ET). Stays live
+//                        through US bank holidays (FX still trades globally); a stale
+//                        last-trade time means FX itself is closed → animation.
+//   Futures            : local Globex session (Sun 18:00 → Fri 17:00 ET, minus the
+//                        daily 17:00–18:00 ET halt). A stale last-trade time during
+//                        what the schedule thinks is an open session = bank holiday
+//                        → animation.
+//   Stocks / ETFs &    : Yahoo's currentTradingPeriod.regular window (epoch). It is
+//   any foreign ticker   precise and per-exchange (NYSE, Bursa, LSE, TSE, …) and
+//                        calendar-aware, so holidays/early-closes are handled
+//                        automatically. Failsafe to NYSE 09:30–16:00 ET when the
+//                        window is absent/degenerate or there's no fresh data.
+//   Unknown ticker     : assume live (safe fallback).
+//
+// The user's tz_offset is never used here — every session is anchored to its own
+// exchange (ET helpers for FX/futures, Yahoo epoch windows for equities).
+// This function is intentionally side-effect free (no LVGL calls).
 static bool is_after_hours(int idx) {
     if (idx < 0 || idx >= cfg.asset_count) return false;
 
     const AssetDef* def = asset_find(cfg.assets[idx]);
     if (!def) return false;
-    if (def->market == MARKET_CRYPTO || def->market == MARKET_COMMODITY) return false;  // 24/7 markets
 
-    // Compute US Eastern time (NYSE is always ET regardless of user's tz_offset).
+    // 24/7 markets — never show the after-hours animation.
+    if (def->market == MARKET_CRYPTO || def->market == MARKET_COMMODITY) return false;
+
+    AssetData* d = &asset_data[idx];
+
+    // Compute US Eastern wall-clock time for local session math.
+    // NYSE/CME/FX sessions are all anchored to ET, independent of the user's tz_offset.
     int wday = -1, mins = -1;
     if (ntp_synced) {
         time_t now_t = time(nullptr);
@@ -297,60 +364,103 @@ static bool is_after_hours(int idx) {
         et_localtime(now_t, &et);
         wday = et.tm_wday;
         mins = et.tm_hour * 60 + et.tm_min;
-
-        // During regular NYSE hours (Mon–Fri 09:30–16:00 ET) always show the chart.
-        // This overrides any incorrect "CLOSED" the YF API sometimes returns for
-        // stocks/ETFs during an active session (a known Yahoo Finance quirk).
-        if (wday >= 1 && wday <= 5 && mins >= 9*60+30 && mins < 16*60)
-            return false;
     }
 
-    AssetData* d = &asset_data[idx];
-
-    // Outside regular hours: trust the API-reported state (handles pre/post-market,
-    // holidays, and early closes that local time alone can't detect).
-    if (d->valid) {
-        return (d->market_state == MSTATE_CLOSED ||
-                d->market_state == MSTATE_POST   ||
-                d->market_state == MSTATE_PRE);
+    // ── Forex ─────────────────────────────────────────────────────────────────
+    // Local FX session (Yahoo's window is too coarse for CCY pairs). A stale
+    // last-trade time means FX itself is closed (e.g. a global holiday).
+    if (def->market == MARKET_FOREX) {
+        if (wday < 0) return false;       // no NTP — assume open (safe failsafe)
+        return !fx_session_open(wday, mins) || last_trade_stale(d);
     }
 
-    // No valid API data: fall back to ET time
-    if (wday < 0) return false;             // no NTP — assume open
-    if (wday == 0 || wday == 6)          return true;   // weekend in ET
-    if (mins < 9*60+30 || mins >= 16*60) return true;   // outside ET session
+    // ── Futures (MARKET_STOCK + continuous=1, e.g. ES=F, NQ=F) ───────────────
+    // Local Globex session + stale-trade holiday detection (Yahoo's window for
+    // futures is a coarse 00:00–23:59 that can't express the real schedule).
+    if (def->market == MARKET_STOCK && def->continuous) {
+        if (wday < 0) return false;
+        return !futures_session_open(wday, mins) || last_trade_stale(d);
+    }
+
+    // ── Regular stocks / ETFs (MARKET_STOCK + continuous=0) & foreign tickers ──
+    // Trust Yahoo's per-exchange, calendar-aware regular trading window when present.
+    // live  ⇔  reg_start ≤ now < reg_end. This auto-adapts to NYSE/Bursa/LSE/TSE and
+    // handles holidays/early-closes with no hardcoding and no dependence on tz_offset.
+    if (d->valid && d->reg_end > d->reg_start) {
+        uint32_t now_s = (uint32_t)time(nullptr);
+        return !(now_s >= d->reg_start && now_s < d->reg_end);
+    }
+
+    // Failsafe (no fresh data, or window absent/degenerate): pure NYSE ET schedule.
+    if (wday < 0) return false;                       // no NTP — assume open
+    if (wday == 0 || wday == 6)          return true; // weekend in ET
+    if (mins < 9*60+30 || mins >= 16*60) return true; // outside ET session
     return false;
 }
 
-// ── Next market open countdown (seconds from now to 09:30 ET next weekday) ────
-static uint32_t secs_to_market_open() {
-    if (!ntp_synced) return 3600;  // fallback 1h
+// ── Next session open countdown (seconds from now to the next open for this asset) ──
+// Targets the correct opening time per asset class:
+//   Stocks / ETFs : next weekday 09:30 ET (NYSE open).
+//   Forex         : next Sunday 17:00 ET (FX session reopens after weekend).
+//   Futures       : next valid open — today 18:00 ET if in the daily halt
+//                   (Mon–Thu 17:00–18:00 ET), otherwise next Sunday 18:00 ET
+//                   (Globex reopens after the weekend gap).
+//   Crypto/Commod : never called (always live), but returns 0 defensively.
+static uint32_t secs_to_market_open(int idx) {
+    if (!ntp_synced) return 3600;  // fallback 1h when NTP not yet synced
+
+    // Determine asset class so we target the right open time.
+    bool is_fx  = false;
+    bool is_fut = false;
+    if (idx >= 0 && idx < cfg.asset_count) {
+        const AssetDef* def = asset_find(cfg.assets[idx]);
+        if (def) {
+            is_fx  = (def->market == MARKET_FOREX);
+            is_fut = (def->market == MARKET_STOCK && def->continuous);
+        }
+    }
 
     time_t now = time(nullptr);
     struct tm et_now;
     et_localtime(now, &et_now);
 
-    // Target: 9:30 AM ET on today's ET date.
+    // Choose the target open hour/minute in ET for this class.
+    int open_h, open_m;
+    if (is_fx)       { open_h = 17; open_m = 0; }   // FX reopens Sun 17:00 ET
+    else if (is_fut) { open_h = 18; open_m = 0; }   // Globex reopens Sun/daily 18:00 ET
+    else             { open_h = 9;  open_m = 30; }  // NYSE opens weekdays 09:30 ET
+
+    // Build candidate: today's ET date at the open time.
     struct tm target = et_now;
-    target.tm_hour = 9;
-    target.tm_min  = 30;
+    target.tm_hour = open_h;
+    target.tm_min  = open_m;
     target.tm_sec  = 0;
     time_t t_open  = et_to_utc(&target, is_us_dst(now));
 
+    // If candidate is already in the past, advance one day.
     if (t_open <= now) {
-        // Already past 9:30 ET today — move to the next calendar day in ET.
-        target.tm_mday += 1;
-        // Advance by one ET day (use tomorrow's UTC midnight to check DST).
-        time_t tomorrow = t_open + 86400;
-        t_open = et_to_utc(&target, is_us_dst(tomorrow));
+        t_open += 86400;
     }
 
-    // Skip weekends in ET.
-    struct tm tgt_et;
-    et_localtime(t_open, &tgt_et);
-    while (tgt_et.tm_wday == 0 || tgt_et.tm_wday == 6) {
-        t_open += 86400;
+    // Skip days on which this market does not open.
+    // FX    : opens only on Sunday (wday=0). Skip all other days.
+    // Futures: opens Sunday (weekend gap) and Mon–Thu (after daily halt).
+    //          Does NOT reopen on Friday evenings or Saturdays — skip those.
+    // Stocks : opens weekdays (Mon–Fri). Skip weekends.
+    for (int guard = 0; guard < 8; guard++) {
+        struct tm tgt_et;
         et_localtime(t_open, &tgt_et);
+        bool day_ok;
+        if (is_fx) {
+            day_ok = (tgt_et.tm_wday == 0);           // Sunday only
+        } else if (is_fut) {
+            // Valid: Sunday and Mon–Thu. Not valid: Friday (wday=5) or Saturday (wday=6).
+            day_ok = (tgt_et.tm_wday != 5 && tgt_et.tm_wday != 6);
+        } else {
+            day_ok = (tgt_et.tm_wday >= 1 && tgt_et.tm_wday <= 5);  // Mon–Fri
+        }
+        if (day_ok) break;
+        t_open += 86400;
     }
 
     int diff = (int)(t_open - now);
@@ -554,7 +664,7 @@ void loop() {
                 if (LV_LOCK()) { anim_stop(); LV_UNLOCK(); }
                 anim_running = false;
             }
-            uint32_t cd = secs_to_market_open();
+            uint32_t cd = secs_to_market_open(cur_idx);  // uses per-class session open time
             if (LV_LOCK()) {
                 lv_obj_t* act_before = lv_scr_act();
                 anim_set_candle_colors(cfg.bull_rgb, cfg.bear_rgb);
@@ -685,7 +795,7 @@ void loop() {
         static unsigned long last_cd_ms = 0;
         if (cfg.after_anim == ANIM_COUNTDOWN && (millis() - last_cd_ms) >= 1000) {
             last_cd_ms = millis();
-            uint32_t cd = secs_to_market_open();
+            uint32_t cd = secs_to_market_open(cur_idx);  // per-class open time
             if (LV_LOCK()) {
                 anim_set_countdown(cd);
                 LV_UNLOCK();

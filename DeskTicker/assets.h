@@ -45,6 +45,11 @@ typedef struct {
     int         candle_count;
     MarketState market_state;
     uint32_t    last_fetch;
+    // Market-session metadata parsed from Yahoo's chart `meta` object. Used by
+    // is_after_hours() to decide live chart vs after-hours animation per asset class.
+    uint32_t    reg_start;     // currentTradingPeriod.regular.start (epoch s); 0 if absent
+    uint32_t    reg_end;       // currentTradingPeriod.regular.end   (epoch s); 0 if absent
+    uint32_t    reg_mkt_time;  // regularMarketTime (last-trade epoch s); 0 if absent
     bool        valid;
     char        err[48];
 } AssetData;

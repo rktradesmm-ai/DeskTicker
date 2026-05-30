@@ -248,7 +248,31 @@ On load, if `tf_n` is missing (old firmware), the single saved `tf` is wrapped i
 - POSIX sign is opposite to human convention: UTC+5:30 → offset=+330 → `"UTC-5:30"`
 - Applied with `configTzTime(tz_buf, NTP_SERVER)` during `S_NTP_SYNC`
 - No DST — user sets their current local offset manually
-- `is_after_hours()` local-time fallback compares against 9:30–16:00 ET regardless of `tz_offset`; this is only used when the API `market_state` field is absent
+- `tz_offset` is **display-only** — it never affects market-hours detection (see below).
+
+---
+
+## Market-Hours Detection (`is_after_hours()`)
+
+Decides live chart vs after-hours animation **per asset class**. Never uses
+`tz_offset` — each session is anchored to its own exchange.
+
+**Yahoo dropped `meta.marketState` from the chart API** (verified: absent for all
+tickers, so `meta["marketState"] | "CLOSED"` always reads CLOSED — do NOT rely on it).
+Detection now uses two surviving `meta` fields, parsed into `AssetData`:
+- `currentTradingPeriod.regular.{start,end}` → `reg_start`/`reg_end` (epoch s): precise,
+  per-exchange, calendar-aware session window. Used for stocks/ETFs **and any foreign
+  ticker** (auto-adapts to NYSE/Bursa/LSE/TSE; holidays handled). Coarse/unusable for
+  FX & futures.
+- `regularMarketTime` → `reg_mkt_time` (last-trade epoch s): fresh during a live
+  session, ≥1 day stale on a holiday. `last_trade_stale()` flags stale > `HOLIDAY_STALE_SECS`
+  (2 h) to detect bank holidays for FX/futures.
+
+Rules: Crypto/Commodity always live · Forex = local session Sun 17:00→Fri 17:00 ET
+(`fx_session_open`) or stale-trade · Futures = local Globex Sun 18:00→Fri 17:00 ET
+minus 17:00–18:00 ET halt (`futures_session_open`) or stale-trade · Stocks/foreign =
+`reg_start ≤ now < reg_end`, failsafe NYSE 09:30–16:00 ET when window absent/no data.
+`secs_to_market_open(idx)` returns the per-class next-open for the countdown animation.
 
 ---
 
@@ -263,7 +287,9 @@ GPIO 0 (labeled **BOOT** on the board, NOT RST). Held LOW for ≥ 3 seconds in `
 
 Four scenes: **Tidepool** (rocky shore, dusk sky, pixel crab walk), **Coral Reef** (underwater
 parallax, tropical fish, pixel crab), **Starfield** (slow star drift), **Countdown** (digital
-clock to NYSE open, crab walk, digit color shifts Pearl→Amber→Green in final 30/5 min).
+clock to the asset's next session open via `secs_to_market_open(idx)` — NYSE 09:30 ET for
+stocks, Sun 17:00 ET for forex, Sun/18:00 ET for futures; crab walk, digit color shifts
+Pearl→Amber→Green in final 30/5 min).
 
 All scenes share `anim_scr` + `anim_canvas` (PSRAM) driven by `lv_timer_create()` at 120 ms.
 Countdown (`ANIM_COUNTDOWN`) additionally uses `cd_crab_canvas` (480×50 PSRAM strip) + a
