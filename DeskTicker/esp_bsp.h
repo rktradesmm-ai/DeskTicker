@@ -116,6 +116,12 @@ bool bsp_display_lock(uint32_t timeout_ms);
  */
 void bsp_display_unlock(void);
 
+/**
+ * @brief Count of tearing-effect (TE) sync waits that timed out and were recovered
+ *        (drew the frame anyway) instead of hanging forever. Surfaced in [health] log.
+ */
+extern volatile uint32_t bsp_te_sync_timeouts;
+
 #ifdef __cplusplus
 }
 #endif

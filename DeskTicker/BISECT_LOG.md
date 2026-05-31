@@ -167,6 +167,56 @@ S_NTP_SYNC=3, S_FETCH=4, S_CHART=5, S_AFTER_HOURS=6, S_RECONNECT=7, S_SETTINGS=8
 heartbeat, and (simulated) that forcing a render stall triggers a reboot whose next boot
 prints the "previous boot…" line.
 
+## Root cause located AND fixed at source — 2026-05-31 (branch `fix/chart-hang-watchdog`)
+
+After the watchdog work, the vendor port layer was read line-by-line and the silent
+deadlock was pinned to **two unbounded `portMAX_DELAY` waits** that run inside the LVGL
+render task while it holds the display lock (`lvgl_mux`). Either one blocking forever =
+whole UI frozen:
+
+1. **`lv_port.c` `lvgl_port_flush_callback()`** — `xSemaphoreTake(trans_done_sem,
+   portMAX_DELAY)` waited forever for each QSPI DMA chunk's "done" signal (given by the
+   `on_color_trans_done` ISR `lvgl_port_flush_ready_callback`). If that completion
+   signal is lost under QSPI/DMA pressure, it hangs forever.
+2. **`esp_bsp.c` `bsp_display_sync_cb()`** (the `draw_wait_cb`, called once per flush) —
+   `xSemaphoreTake(te_v_sync_sem, portMAX_DELAY)` waited forever for the display's
+   tearing-effect (TE) GPIO interrupt. A missed TE pulse → hangs forever.
+
+This confirms the long-standing "DMA pressure + TE sync" hypothesis at the code level.
+
+**Fix — bound both waits + recover (no reboot needed):**
+- `lv_port.c`: wait `LVGL_PORT_FLUSH_TIMEOUT_MS` (100 ms). On timeout, increment
+  `lvgl_port_flush_timeouts` and `break` out of the chunk loop. `lv_disp_flush_ready()`
+  still runs after the loop, so LVGL is released and (`full_refresh=1`) the whole screen
+  repaints next frame.
+- `esp_bsp.c`: wait `BSP_TE_SYNC_TIMEOUT_MS` (100 ms). On timeout, increment
+  `bsp_te_sync_timeouts` and draw the frame anyway (worst case: one torn frame).
+- 100 ms is far above normal latency (~16 ms frame, sub-ms per DMA chunk) and far below
+  the 30 s render watchdog, so only a genuine stall trips it.
+- Counters are `extern` (`lv_port.h` / `esp_bsp.h`) and printed in the 60 s `[health]`
+  line as `flushTO=` / `teTO=`. **Climbing counters with no freeze = the fix is catching
+  real misses that previously WOULD have frozen the device.**
+
+**Layering:** this removes the deadlock itself; the always-on render watchdog (previous
+section) remains as the final backstop if anything else ever wedges the render task.
+
+**Why NOT upgrade LVGL to fix this:** the bug is in board glue code *below* LVGL
+(`lv_port.c` / `esp_bsp.c`), not in LVGL. Upgrading LVGL (e.g. to 9.x) would not touch
+these waits, would force a full rewrite of `lv_port.c` against LVGL 9's new display API
+(`lv_display_t`, new flush-cb signature) plus all screen code (still v8 API), and would
+re-introduce the same two waits. Ruled out. Core stays 3.0.7; LVGL stays v8.3.x;
+`full_refresh` stays 1.
+
+**Recovery trade-off (accepted):** a timed-out flush breaks before all chunks draw; a
+late DMA-done ISR may leave `trans_done_sem` pre-signalled so the next frame's first
+chunk skips its wait → at most one torn/partial frame, self-corrected by the next full
+refresh. Strictly better than a permanent freeze.
+
+**Still needs:** on-device soak on core 3.0.7. Success = no freeze, no watchdog reboot;
+non-zero `flushTO`/`teTO` are the recovered events. To prove recovery quickly, temporarily
+drop the two timeouts to ~5 ms, confirm the UI keeps running while the counters climb,
+then restore 100 ms.
+
 ## Known separate bugs (not hang-related)
 - **QQQ/commodities unavailable during US market hours:** Likely caused
   by UTC+8 timezone setting shifting the market-hours check by ~12 h.

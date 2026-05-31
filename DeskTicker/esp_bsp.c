@@ -31,6 +31,19 @@
 
 static const char *TAG = "example";
 
+// Max time to wait for the display's tearing-effect (TE) sync pulse before drawing
+// anyway. The previous code waited forever (portMAX_DELAY); a missed TE interrupt
+// under bus pressure hung the render task forever holding the display lock — the
+// silent freeze in BISECT_LOG.md. 100 ms is far above the ~16 ms frame interval and
+// far below the 30 s render watchdog. On timeout we draw the frame (at most one tear)
+// instead of deadlocking.
+#define BSP_TE_SYNC_TIMEOUT_MS 100
+
+// Diagnostic counter: TE sync waits that timed out and were recovered. Read in the
+// 60 s [health] log. Climbing with no freeze = the fix is catching real TE misses.
+// Declared in esp_bsp.h.
+volatile uint32_t bsp_te_sync_timeouts = 0;
+
 static const axs15231b_lcd_init_cmd_t lcd_init_cmds[] = {
     {0xBB, (uint8_t []){0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x5A, 0xA5}, 8, 0},
     {0xA0, (uint8_t []){0xC0, 0x10, 0x00, 0x02, 0x00, 0x00, 0x04, 0x3F, 0x20, 0x05, 0x3F, 0x3F, 0x00, 0x00, 0x00, 0x00, 0x00}, 17, 0},
@@ -182,8 +195,12 @@ static bool bsp_display_sync_cb(void *arg)
     }
 
     if (tear_handle->te_v_sync_sem) {
-
-        xSemaphoreTake(tear_handle->te_v_sync_sem, portMAX_DELAY);
+        // Bounded wait for the TE pulse. On timeout the TE interrupt was missed —
+        // draw the frame anyway (worst case one torn frame) rather than hang forever.
+        if (xSemaphoreTake(tear_handle->te_v_sync_sem,
+                           pdMS_TO_TICKS(BSP_TE_SYNC_TIMEOUT_MS)) != pdTRUE) {
+            bsp_te_sync_timeouts++;
+        }
     }
     return true;
 }

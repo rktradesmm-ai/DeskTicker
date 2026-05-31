@@ -563,11 +563,13 @@ void loop() {
         last_health_ms = millis();
         uint32_t hb = render_wdt_heartbeat();
         Serial.printf("[health] state=%d freeHeap=%u freePSRAM=%u largestPSRAM=%u "
-                      "renderHB=%u (+%u/min)\n",
+                      "renderHB=%u (+%u/min) flushTO=%u teTO=%u\n",
                       (int)state, (unsigned)ESP.getFreeHeap(),
                       (unsigned)ESP.getFreePsram(),
                       (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM),
-                      (unsigned)hb, (unsigned)(hb - last_hb));
+                      (unsigned)hb, (unsigned)(hb - last_hb),
+                      (unsigned)lvgl_port_flush_timeouts,
+                      (unsigned)bsp_te_sync_timeouts);
         last_hb = hb;
     }
 

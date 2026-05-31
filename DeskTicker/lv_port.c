@@ -31,6 +31,19 @@
 
 static const char *TAG = "LVGL";
 
+// Max time the flush callback will wait for one QSPI DMA chunk to report "done"
+// before giving up on that frame. The previous code waited forever (portMAX_DELAY);
+// if the DMA-done signal was lost under bus pressure the LVGL render task hung
+// forever holding the display lock — the silent freeze in BISECT_LOG.md. 100 ms is
+// ~6 frame times: far above normal per-chunk DMA latency, far below the 30 s render
+// watchdog, so a real stall is caught and recovered instead of deadlocking.
+#define LVGL_PORT_FLUSH_TIMEOUT_MS 100
+
+// Diagnostic counter: number of times the DMA-done wait above timed out and we
+// recovered. Read in the 60 s [health] log. Climbing with no freeze = the fix is
+// catching real DMA-completion misses. Declared in lv_port.h.
+volatile uint32_t lvgl_port_flush_timeouts = 0;
+
 /*******************************************************************************
 * Types definitions
 *******************************************************************************/
@@ -555,7 +568,15 @@ static void lvgl_port_flush_callback(lv_disp_drv_t *drv, const lv_area_t *area, 
                 xSemaphoreGive(disp_ctx->trans_done_sem);
             }
 
-            xSemaphoreTake(disp_ctx->trans_done_sem, portMAX_DELAY);
+            // Bounded wait for the previous chunk's DMA to finish. On timeout the
+            // DMA-done ISR signal was lost — recover by abandoning this frame instead
+            // of hanging forever. lv_disp_flush_ready() still runs after the loop, so
+            // LVGL is released and (full_refresh=1) the whole screen repaints next frame.
+            if (xSemaphoreTake(disp_ctx->trans_done_sem,
+                               pdMS_TO_TICKS(LVGL_PORT_FLUSH_TIMEOUT_MS)) != pdTRUE) {
+                lvgl_port_flush_timeouts++;
+                break;
+            }
             esp_lcd_panel_draw_bitmap(disp_ctx->panel_handle, x_draw_start, y_draw_start, x_draw_end + 1, y_draw_end + 1, to);
 
             if (LV_DISP_ROT_90 == rotate) {

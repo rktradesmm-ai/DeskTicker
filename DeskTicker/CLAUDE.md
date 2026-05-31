@@ -315,6 +315,17 @@ after-hours only before 2026-05-30). `anim_start`/`anim_stop` no longer touch it
 reboot…`; a `[health]` line every 60 s logs heap/PSRAM/heartbeat. Being always-on, it also
 retires the old "watchdog never runs >5 min" soak-test caveat.
 
+**Display-flush deadlock — fixed at source (bounded waits):** the silent freeze was the
+two `portMAX_DELAY` waits in the vendor flush path — `trans_done_sem` (QSPI DMA-done) in
+`lv_port.c` `lvgl_port_flush_callback()` and `te_v_sync_sem` (tearing-effect pulse) in
+`esp_bsp.c` `bsp_display_sync_cb()`. Both now use a 100 ms bounded `xSemaphoreTake`
+(`LVGL_PORT_FLUSH_TIMEOUT_MS` / `BSP_TE_SYNC_TIMEOUT_MS`): on timeout they recover (flush
+breaks → repaint next frame; TE draws anyway, worst case one tear) instead of hanging. Hit
+counts are `lvgl_port_flush_timeouts` / `bsp_te_sync_timeouts` (extern in the headers),
+shown in `[health]` as `flushTO=`/`teTO=`. The watchdog above is now the backstop, not the
+primary fix. This is below LVGL, so an LVGL upgrade would not fix it (and would force a full
+LVGL-9 port-layer rewrite). Core stays 3.0.7; `full_refresh` stays 1. See `BISECT_LOG.md`.
+
 ---
 
 ## On-Device Settings Menu

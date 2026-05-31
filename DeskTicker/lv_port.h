@@ -159,6 +159,12 @@ bool lvgl_port_lock(uint32_t timeout_ms);
  */
 void lvgl_port_unlock(void);
 
+/**
+ * @brief Count of QSPI DMA-done waits that timed out in the flush callback and were
+ *        recovered (instead of hanging forever). Surfaced in the 60 s [health] log.
+ */
+extern volatile uint32_t lvgl_port_flush_timeouts;
+
 #ifdef __cplusplus
 }
 #endif
