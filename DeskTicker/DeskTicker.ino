@@ -97,6 +97,13 @@ static bool        anim_running     = false;
 static bool        chart_displaced  = false;
 static bool        ntp_synced       = false;
 
+// Persist last-viewed asset and TF across watchdog reboots so the device resumes
+// the same view instead of starting from asset 0 / NVS-saved TF. RTC RAM survives
+// esp_restart but is zeroed on power-on, so these are only valid when rtc_resume_valid=true.
+RTC_DATA_ATTR static int  rtc_resume_asset_idx = 0;
+RTC_DATA_ATTR static int  rtc_resume_tf         = 0;
+RTC_DATA_ATTR static bool rtc_resume_valid       = false;
+
 // ── LVGL helper macros ────────────────────────────────────────────────────────
 #define LV_LOCK()   bsp_display_lock(2000)  // 2 s timeout — prevents permanent freeze if vendor TE flush stalls
 #define LV_UNLOCK() bsp_display_unlock()
@@ -503,7 +510,8 @@ void setup() {
     // If the previous boot was a watchdog reboot, report it so a chart hang is visible
     // and its timing measurable on the serial monitor.
     WdtReboot wr;
-    if (render_wdt_consume_last_reboot(&wr)) {
+    bool was_wdt_reboot = render_wdt_consume_last_reboot(&wr);
+    if (was_wdt_reboot) {
         // phase: 0=idle  2=TE wait  3=DMA-done wait  4=tx_color pixel DMA (freezeTest2)
         //        5=flush done  6=mutex wait  7=tx_param CASET cmd (new sub-phase)
         Serial.printf("[WDT] previous boot ended in a render-watchdog reboot: "
@@ -520,6 +528,22 @@ void setup() {
     Serial.printf("[setup] settings loaded: wifi_ok=%d assets=%d tf=%d brightness=%d\n",
                   cfg.wifi_ok, cfg.asset_count, cfg.timeframe, cfg.brightness);
     bsp_display_brightness_set(cfg.brightness);
+
+    // After settings are loaded: if this was a watchdog reboot, restore the last-viewed
+    // asset and timeframe so the reboot is invisible to the user.
+    if (was_wdt_reboot && rtc_resume_valid) {
+        if (rtc_resume_asset_idx < cfg.asset_count) {
+            cur_idx = rtc_resume_asset_idx;
+        }
+        for (int i = 0; i < cfg.timeframe_count; i++) {
+            if (cfg.timeframes[i] == rtc_resume_tf) {
+                cfg.timeframe = rtc_resume_tf;
+                break;
+            }
+        }
+        Serial.printf("[WDT] resuming last view: asset_idx=%d tf=%d\n",
+                      cur_idx, cfg.timeframe);
+    }
 
     // Kick off WiFi before the splash so the 3 s hold isn't dead time.
     if (cfg.wifi_ok) {
@@ -636,6 +660,11 @@ void loop() {
 
     // ── Fetch market data ─────────────────────────────────────────────────
     case S_FETCH: {
+        // Record the intended asset+TF so a watchdog reboot can resume here.
+        rtc_resume_asset_idx = cur_idx;
+        rtc_resume_tf        = cfg.timeframe;
+        rtc_resume_valid     = true;
+
         if (!wifi_is_connected()) {
             state = S_RECONNECT;
             break;
