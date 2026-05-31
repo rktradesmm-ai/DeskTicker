@@ -61,6 +61,10 @@ void render_wdt_set_context(uint8_t state_code);
 // Render-task heartbeat (increments ~1/s while the render task is alive).
 uint32_t render_wdt_heartbeat();
 
+// Reset the render watchdog countdown immediately (without waiting for the 1s feed timer).
+// Call before lvgl_port_stop() so the watchdog doesn't false-fire during the fetch pause.
+void render_wdt_keepalive();
+
 // If the previous boot ended in a watchdog reboot, copy details to *out, clear the
 // marker, and return true. Call once early in setup().
 bool render_wdt_consume_last_reboot(WdtReboot* out);

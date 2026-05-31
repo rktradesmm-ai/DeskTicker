@@ -1887,6 +1887,13 @@ static void render_feed_cb(lv_timer_t*) {
     wdt_feed();
 }
 
+// Public feed: resets the watchdog countdown immediately without waiting for the 1 s
+// lv_timer. Use before lvgl_port_stop() so the watchdog won't false-fire while LVGL
+// rendering (and therefore the lv_timer feed) is paused during an HTTP fetch.
+void render_wdt_keepalive() {
+    wdt_feed();
+}
+
 // Arm the always-on watchdog and start its 1 s feed timer. Call once from setup(),
 // under LV_LOCK, after bsp_display_start() (the render task must already exist).
 void render_wdt_init() {
