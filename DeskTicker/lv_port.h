@@ -160,6 +160,21 @@ bool lvgl_port_lock(uint32_t timeout_ms);
 void lvgl_port_unlock(void);
 
 /**
+ * @brief Pause LVGL rendering (disables tick timer and lv_timer processing).
+ *        Call before a blocking operation (e.g. HTTP fetch) to prevent QSPI DMA
+ *        from running concurrently with WiFi DMA on the shared internal AHB bus.
+ *        Resume with lvgl_port_resume() when done.
+ */
+esp_err_t lvgl_port_stop(void);
+
+/**
+ * @brief Resume LVGL rendering after lvgl_port_stop(). Restarts the tick timer;
+ *        lv_timer_handler() will process timers and flush dirty regions normally
+ *        within a few milliseconds.
+ */
+esp_err_t lvgl_port_resume(void);
+
+/**
  * @brief Count of QSPI DMA-done waits that timed out in the flush callback and were
  *        recovered (instead of hanging forever). Surfaced in the 60 s [health] log.
  */
