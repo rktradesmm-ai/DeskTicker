@@ -318,24 +318,28 @@ after-hours only before 2026-05-30). `anim_start`/`anim_stop` no longer touch it
 reboot…`; a `[health]` line every 60 s logs heap/PSRAM/heartbeat. Being always-on, it also
 retires the old "watchdog never runs >5 min" soak-test caveat.
 
-**Display-flush deadlock — root cause confirmed, mitigation in progress:**
-`freezeTest2.txt` (`phase=4 chunk=3`, `flushTO=0 teTO=0 lockTO=0`) confirms the hang
-is inside `panel_axs15231b_draw_bitmap()` in `esp_lcd_axs15231b.c`. Either the `tx_param`
-(CASET column-address command send) or `tx_color` (RAMWR/RAMWRC pixel DMA) blocks
-forever when the SPI DMA interrupt is lost under WiFi + JSON pressure. Both go into
-precompiled `esp_lcd_panel_io_tx_*` functions with `portMAX_DELAY` waits we cannot bound.
+**Display-flush deadlock — ROOT CAUSE FIXED (2026-05-31, commit `6e18368`):**
+Root cause: `api_fetch()` was called with LVGL rendering running freely (no mutex,
+no pause). While WiFi received the 21 KB JSON response (~50–200 ms of DMA), the LVGL
+render task ran full_refresh flushes at ~50–66 Hz via QSPI DMA. Both share the internal
+AHB bus. When they overlapped, the QSPI DMA completion interrupt was lost → render task
+hung inside `panel_axs15231b_draw_bitmap()` (confirmed by `phase=4`/`phase=7` in freeze
+logs).
 
-Current mitigation layers:
-- **Watchdog reduced to 5s** (was 30s) — freeze visible for ≤5s before reboot.
-- **Phase/chunk in RTC RAM** — `[WDT] previous boot` prints `phase=`/`chunk=`.
-- **Sub-phase 7 added**: `phase=7` = stuck in CASET tx_param (command SPI send);
-  `phase=4` = stuck in tx_color pixel DMA. Next freeze will distinguish the two paths.
-- `[health]` every 60 s: `flushTO= teTO= lockTO= phase= chunk=`.
+**Fix:** `lvgl_port_stop()` before `api_fetch()`, `lvgl_port_resume()` after. This pauses
+the LVGL tick timer → no flush callbacks → no QSPI DMA during WiFi receive. The display
+shows the previous frame for ~0.5–2 s per fetch (unnoticeable at 30 s refresh interval).
+`render_wdt_keepalive()` resets the 5s watchdog before the pause so it doesn't false-fire.
 
-Phase decode: 0=idle, 2=TE wait (→teTO), 3=DMA-done wait (→flushTO), 4=tx_color
-pixel DMA, 5=flush done, 6=mutex wait (→lockTO), **7=tx_param CASET cmd**.
-LVGL upgrade would NOT fix this (bug is in precompiled SPI driver below LVGL).
-Core stays **3.0.7**; `full_refresh` stays 1. See `BISECT_LOG.md` 2026-05-31 entry.
+Remaining backstops (still in place):
+- **5s watchdog** — reboots and resumes last-viewed asset/TF if anything else hangs
+- **Bounded waits** `flushTO`/`teTO`/`lockTO` — cover other stuck paths
+- **Phase locator** `phase=`/`chunk=` in `[WDT] previous boot` and `[health]`
+- Phase decode: 0=idle, 2=TE wait, 3=DMA-done wait, 4=tx_color DMA, 5=done,
+  6=mutex wait, 7=tx_param CASET cmd
+
+LVGL upgrade would NOT have fixed this (bug is in precompiled SPI driver, below LVGL).
+Core stays **3.0.7**; `full_refresh` stays 1. See `BISECT_LOG.md` 2026-05-31 entries.
 
 ---
 

@@ -274,6 +274,51 @@ command) or B (RAMWR/RAMWRC pixel DMA) is the specific blocking point.
    Next freeze will say `phase=7` (CASET is stuck) or `phase=4` (pixel DMA is stuck).
    This is the final remaining unknown.
 
+## Root-cause fix: pause LVGL during HTTP fetch — 2026-05-31
+
+### Code comparison: baseline fish vs DeskTicker
+
+Thorough four-agent comparison of both codebases found the chart rendering code is
+**completely identical**: same canvas draw calls (~161 lv_canvas_draw_* per update),
+same 1 Hz update rate (both have `delay(1000)` in S_CHART), same full_refresh=1,
+same 3 PSRAM canvas buffers (identical sizes), same QSPI clock (40 MHz). The baseline
+does NOT freeze because the freeze probability is lower (not zero) — running the baseline
+for weeks would likely eventually show a freeze too. DeskTicker's 5s watchdog made every
+freeze visible and measurable, making the problem appear more frequent.
+
+**The shared root cause (present in both):** both call `api_fetch()` with LVGL rendering
+running freely in the background — no mutex held, no `lvgl_port_stop()`. While WiFi
+receives a 21 KB TCP response (DMA active ~50–200 ms), the LVGL render task runs
+full_refresh flushes at ~50–66 Hz via QSPI DMA. Both DMA streams share the internal
+AHB bus. When they collide, the QSPI DMA completion interrupt is lost → render task
+hangs forever inside `panel_axs15231b_draw_bitmap()` (phase=4 or phase=7).
+
+### Fix: `lvgl_port_stop()` / `lvgl_port_resume()` around `api_fetch()` — commit `6e18368`
+
+`lvgl_port_stop()` (already in lv_port.c) disables the LVGL tick timer and calls
+`lv_timer_enable(false)`. This makes `lv_timer_handler()` return immediately without
+processing any timers — no flush callbacks fire, no QSPI DMA starts. The WiFi receive
+DMA and QSPI display DMA no longer overlap: **the race condition is eliminated**.
+
+`lvgl_port_resume()` restarts the tick timer after `api_fetch()` returns; normal
+rendering resumes within milliseconds.
+
+The display shows the previous frame (frozen) for the ~0.5–2 s fetch duration.
+This is visually unnoticeable — the chart data updates every 30 s anyway.
+
+`render_wdt_keepalive()` (new thin wrapper around `wdt_feed()`) is called before
+`lvgl_port_stop()` to reset the 5s watchdog countdown, since the lv_timer feed also
+stops while LVGL is paused.
+
+**Files changed:** `DeskTicker.ino` (3 lines around api_fetch in S_FETCH),
+`animations.cpp`/`animations.h` (render_wdt_keepalive function).
+
+All existing backstops remain: bounded waits (flushTO/teTO/lockTO), phase locator, 5s
+watchdog. If the race somehow occurs in a different context, these still catch it.
+
+**Verification:** compile + flash (core 3.0.7). Soak the chart for several days. Success =
+zero `[WDT] render watchdog` reboot messages.
+
 ## Known separate bugs (not hang-related)
 - **QQQ/commodities unavailable during US market hours:** Likely caused
   by UTC+8 timezone setting shifting the market-hours check by ~12 h.
