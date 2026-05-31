@@ -44,6 +44,21 @@ static const char *TAG = "LVGL";
 // catching real DMA-completion misses. Declared in lv_port.h.
 volatile uint32_t lvgl_port_flush_timeouts = 0;
 
+// Bounded acquire for the render-loop mutex (see lvgl_port_task below). On timeout
+// we skip one frame and count it instead of freezing the render task forever.
+#define LVGL_PORT_LOCK_TIMEOUT_MS 1000
+volatile uint32_t lvgl_lock_timeouts = 0;
+
+// Render-phase locator: records which step the render task is currently executing.
+// Stashed into RTC RAM by wdt_fire() before a watchdog reboot so the NEXT boot
+// can report the exact stuck line. Also surfaced live in [health] every 60 s.
+// Values: 0=idle, 2=waiting TE sync, 3=waiting chunk DMA-done (flushTO covers this),
+//         4=inside precompiled esp_lcd_panel_draw_bitmap (suspected hang),
+//         5=flush done, 6=acquiring render-loop mutex (lockTO covers this).
+// Declared in lv_port.h.
+volatile uint8_t  lvgl_render_phase = 0;
+volatile uint8_t  lvgl_render_chunk = 0;
+
 /*******************************************************************************
 * Types definitions
 *******************************************************************************/
@@ -393,10 +408,19 @@ static void lvgl_port_task(void *arg)
     ESP_LOGI(TAG, "Starting LVGL task");
     lvgl_port_ctx.running = true;
     while (lvgl_port_ctx.running) {
-        if (lvgl_port_lock(0)) {
+        lvgl_render_phase = 6;                 // acquiring render-loop mutex
+        // Bounded acquire (was lvgl_port_lock(0) = portMAX_DELAY). If another task
+        // holds lvgl_mux and stalls, skip this frame instead of deadlocking silently.
+        // lockTO counter and phase=6 in [health] identify this case.
+        if (lvgl_port_lock(LVGL_PORT_LOCK_TIMEOUT_MS)) {
+            lvgl_render_phase = 0;
             task_delay_ms = lv_timer_handler();
             lvgl_port_unlock();
+        } else {
+            lvgl_lock_timeouts++;
+            task_delay_ms = 1;                 // retry almost immediately
         }
+        lvgl_render_phase = 0;
         if ((task_delay_ms > lvgl_port_ctx.task_max_sleep_ms) || (1 == task_delay_ms)) {
             task_delay_ms = lvgl_port_ctx.task_max_sleep_ms;
         } else if (task_delay_ms < 1) {
@@ -563,6 +587,7 @@ static void lvgl_port_flush_callback(lv_disp_drv_t *drv, const lv_area_t *area, 
 
             if (0 == i) {
                 if (disp_ctx->draw_wait_cb) {
+                    lvgl_render_phase = 2;     // waiting for TE sync (first chunk only)
                     disp_ctx->draw_wait_cb(disp_ctx->panel_handle->user_data);
                 }
                 xSemaphoreGive(disp_ctx->trans_done_sem);
@@ -572,11 +597,14 @@ static void lvgl_port_flush_callback(lv_disp_drv_t *drv, const lv_area_t *area, 
             // DMA-done ISR signal was lost — recover by abandoning this frame instead
             // of hanging forever. lv_disp_flush_ready() still runs after the loop, so
             // LVGL is released and (full_refresh=1) the whole screen repaints next frame.
+            lvgl_render_chunk = (uint8_t)i;
+            lvgl_render_phase = 3;             // waiting for previous chunk DMA-done
             if (xSemaphoreTake(disp_ctx->trans_done_sem,
                                pdMS_TO_TICKS(LVGL_PORT_FLUSH_TIMEOUT_MS)) != pdTRUE) {
                 lvgl_port_flush_timeouts++;
                 break;
             }
+            lvgl_render_phase = 4;             // inside precompiled esp_lcd draw (suspected hang point)
             esp_lcd_panel_draw_bitmap(disp_ctx->panel_handle, x_draw_start, y_draw_start, x_draw_end + 1, y_draw_end + 1, to);
 
             if (LV_DISP_ROT_90 == rotate) {
@@ -590,9 +618,12 @@ static void lvgl_port_flush_callback(lv_disp_drv_t *drv, const lv_area_t *area, 
             }
         }
     } else {
+        lvgl_render_phase = 4;                 // inside precompiled esp_lcd draw (non-rotation path)
         esp_lcd_panel_draw_bitmap(disp_ctx->panel_handle, x_start, y_start, x_end + 1, y_end + 1, color_map);
     }
+    lvgl_render_phase = 5;                     // flush done
     lv_disp_flush_ready(drv);
+    lvgl_render_phase = 0;
 }
 
 #ifdef ESP_LVGL_PORT_TOUCH_COMPONENT

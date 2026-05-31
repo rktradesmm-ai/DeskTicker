@@ -36,8 +36,10 @@ a candlestick chart on a 3.5" 480×320 IPS touchscreen. No cloud backend, no API
 | `settings_screen.h / .cpp` | On-device settings menu: assets, TF, TZ, candle colour, anim, cycling, brightness, diagnostics |
 | `tz_options.h / .cpp` | Shared 34-entry timezone table consumed by both `wifi_manager` and `settings_screen` |
 
-Board support files (`esp_bsp`, `lv_port`, `esp_lcd_*`, `display.h`, `lv_conf.h`) are copied
-from the JC3248W535EN demo and must not be edited. Both vendor waits are at stock settings.
+Board support files (`esp_bsp`, `lv_port`, `esp_lcd_*`, `display.h`, `lv_conf.h`) were
+originally copied from the JC3248W535EN demo. `lv_port.c`, `lv_port.h`, `esp_bsp.c`, and
+`esp_bsp.h` have been edited for the display-deadlock investigation (see below). The others
+(`esp_lcd_*`, `display.h`, `lv_conf.h`) remain unmodified.
 
 **PERMANENT INCOMPATIBILITY — `full_refresh` must stay `1` in `lv_port.c`.**
 `full_refresh = 0` (partial refresh) was tested and immediately caused severe garbled display
@@ -47,11 +49,12 @@ full-screen writes only. Partial-area `(x1,y1)→(x2,y2)` coordinates are mis-ma
 the rotation, landing in the wrong physical display region. Do not attempt partial refresh again
 without first rewriting the flush callback's rotation to handle sub-screen areas.
 
-**Do not change the semaphore waits.** Both `trans_done_sem` wait (`lv_port.c`) and
-`te_v_sync_sem` wait (`esp_bsp.c`) are at stock `portMAX_DELAY`. An earlier experiment
-replaced these with bounded `pdMS_TO_TICKS(100/250)` values; that was reverted because the
-bounded timeouts broke QSPI/DMA serialization, allowing a new transfer to be queued before
-the previous one completed, silently wedging the SPI driver's internal queue.
+**Semaphore waits — currently bounded (see investigation below).** Both
+`trans_done_sem` in `lv_port.c` and `te_v_sync_sem` in `esp_bsp.c` are bounded to 100 ms
+(`LVGL_PORT_FLUSH_TIMEOUT_MS` / `BSP_TE_SYNC_TIMEOUT_MS`). This replaced the original
+`portMAX_DELAY`. However, first soak data shows `flushTO=0 teTO=0` at the freeze — meaning
+the bounded waits are NOT on the critical path during the chart hang. Investigation continues
+(render-phase locator added; see BISECT_LOG.md 2026-05-31 entry).
 
 ---
 
@@ -315,16 +318,20 @@ after-hours only before 2026-05-30). `anim_start`/`anim_stop` no longer touch it
 reboot…`; a `[health]` line every 60 s logs heap/PSRAM/heartbeat. Being always-on, it also
 retires the old "watchdog never runs >5 min" soak-test caveat.
 
-**Display-flush deadlock — fixed at source (bounded waits):** the silent freeze was the
-two `portMAX_DELAY` waits in the vendor flush path — `trans_done_sem` (QSPI DMA-done) in
-`lv_port.c` `lvgl_port_flush_callback()` and `te_v_sync_sem` (tearing-effect pulse) in
-`esp_bsp.c` `bsp_display_sync_cb()`. Both now use a 100 ms bounded `xSemaphoreTake`
-(`LVGL_PORT_FLUSH_TIMEOUT_MS` / `BSP_TE_SYNC_TIMEOUT_MS`): on timeout they recover (flush
-breaks → repaint next frame; TE draws anyway, worst case one tear) instead of hanging. Hit
-counts are `lvgl_port_flush_timeouts` / `bsp_te_sync_timeouts` (extern in the headers),
-shown in `[health]` as `flushTO=`/`teTO=`. The watchdog above is now the backstop, not the
-primary fix. This is below LVGL, so an LVGL upgrade would not fix it (and would force a full
-LVGL-9 port-layer rewrite). Core stays 3.0.7; `full_refresh` stays 1. See `BISECT_LOG.md`.
+**Display-flush deadlock — investigation in progress:** the chart hangs with `flushTO=0
+teTO=0` (soak data `freezeTest1.txt`, 2026-05-31), meaning the freeze is NOT in the two
+bounded waits we added. Leading suspect: inside `esp_lcd_panel_draw_bitmap()` at
+`lv_port.c:580` — that call enters the precompiled `esp_lcd` component which has its own
+internal descriptor/bus semaphore we cannot see or bound. Diagnostics added this round:
+- **`lvgl_render_phase`** (0–6) and **`lvgl_render_chunk`** mark the exact step the
+  render task is at; stashed to RTC RAM before each watchdog reboot and shown in `[WDT]
+  previous boot` as `phase=`/`chunk=` so the NEXT freeze tells us the stuck line.
+- **`lvgl_lock_timeouts`** (`lockTO=`) counts render-loop mutex timeouts (was unbounded).
+- `[health]` now shows `flushTO=`/`teTO=`/`lockTO=`/`phase=`/`chunk=`.
+Phase decode: 0=idle, 2=TE wait, 3=chunk DMA-done wait, **4=inside `esp_lcd_panel_draw_bitmap`
+(most likely hang point)**, 5=flush done, 6=mutex wait. LVGL upgrade would NOT fix this
+(bug is below LVGL; LVGL-9 port would need a full rewrite). Core stays 3.0.7;
+`full_refresh` stays 1. See `BISECT_LOG.md` 2026-05-31 entry.
 
 ---
 

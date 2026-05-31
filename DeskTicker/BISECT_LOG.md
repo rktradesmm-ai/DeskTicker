@@ -288,3 +288,42 @@ stress-test the watchdog and a new animation under continuous load:
    the watchdog reset reason. That is the signal that the new animation hung and the
    watchdog saved it.
 4. Revert the poll interval before committing.
+
+---
+
+## Bounded-wait fix did NOT prevent the hang — 2026-05-31 soak data
+
+**Test:** flashed `fix/chart-hang-watchdog` (commit `493c2c9`) with both bounded
+waits (`LVGL_PORT_FLUSH_TIMEOUT_MS = 100 ms`, `BSP_TE_SYNC_TIMEOUT_MS = 100 ms`)
+and `flushTO`/`teTO` counters in the `[health]` log. Ran the live chart on core 3.0.7.
+
+**Result (from `freezeTest1.txt`):**
+```
+[health] state=5 ... renderHB=8607 (+89/min) flushTO=0 teTO=0
+...
+[WDT] render watchdog: no frame in 30s, rebooting (state=5 heap=186340 psram=7853060 hb=8740)
+```
+
+- Hung in **state=5 (S_CHART)**, right after a WiFi reconnect + a heavy BTC fetch
+  (21756 bytes body) — peak bus/CPU pressure.
+- **`flushTO=0` and `teTO=0`** at reboot — NEITHER bounded wait we added ever fired.
+- `renderHB` climbed 8607→8725→8740 then stopped; 30 s later watchdog rebooted.
+
+**Conclusion:** Our two bounded waits are correct but did NOT address the right spot.
+The render task froze somewhere else — the two waits we bounded are not on the critical
+path during this type of hang. Leading suspect: the precompiled
+`esp_lcd_panel_io_tx_color()` call buried inside `esp_lcd_panel_draw_bitmap()` (called
+from `lvgl_port_flush_callback():580`), which has its own internal descriptor/bus
+semaphore wait that we cannot see or edit.
+
+**Action taken — 2026-05-31:** Added a render-phase locator that stashes the exact
+step into RTC RAM before each watchdog reboot, so the NEXT freeze's `[WDT] previous
+boot` line will say `phase=4 chunk=N` (or whichever step is actually stuck) instead of
+requiring us to guess:
+- **Phase values:** 0=idle/timer-cb, 2=TE sync wait (bounded `teTO`), 3=chunk
+  DMA-done wait (bounded `flushTO`), **4=inside precompiled `esp_lcd_panel_draw_bitmap`
+  (the suspected stuck point)**, 5=flush done, 6=render-loop mutex wait (bounded `lockTO`)
+- Also added `lockTO` (bounded the render-loop `lvgl_mux` acquire, was `portMAX_DELAY`)
+  and surfaced `lockTO=/phase=/chunk=` in the 60 s `[health]` log.
+- After the next freeze, read the `[WDT]` boot line: `phase=4` confirms the draw path;
+  `phase=6` means mutex starvation; `phase=0` means a chart timer callback is blocking.

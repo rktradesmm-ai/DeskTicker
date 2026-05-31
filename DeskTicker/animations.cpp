@@ -7,6 +7,7 @@
 #include "chart_screen.h"  // SCR_W, SCR_H
 #include "esp_timer.h"
 #include <time.h>          // time() for the watchdog reboot timestamp
+#include "lv_port.h"       // lvgl_render_phase / lvgl_render_chunk (phase locator)
 
 // ── Render-task liveness watchdog (always-on) ─────────────────────────────────
 // Independent hardware timer (esp_timer, NOT an LVGL timer) that reboots the
@@ -43,10 +44,14 @@ static void wdt_fire(void*) {
     s_reboot_mark.free_heap    = (uint32_t)ESP.getFreeHeap();
     s_reboot_mark.free_psram   = (uint32_t)ESP.getFreePsram();
     s_reboot_mark.reboot_epoch = (uint32_t)time(nullptr);
+    // Capture the render-phase locator (0=idle/cb, 2=TE sync, 3=DMA-done wait,
+    // 4=esp_lcd draw — most likely stuck point, 5=flush done, 6=mutex wait).
+    s_reboot_mark.phase        = lvgl_render_phase;
+    s_reboot_mark.chunk        = lvgl_render_chunk;
     Serial.printf("[WDT] render watchdog: no frame in 30s, rebooting "
-                  "(state=%u heap=%u psram=%u hb=%u)\n",
-                  s_last_state, s_reboot_mark.free_heap,
-                  s_reboot_mark.free_psram, s_heartbeat);
+                  "(state=%u phase=%u chunk=%u heap=%u psram=%u hb=%u)\n",
+                  s_last_state, s_reboot_mark.phase, s_reboot_mark.chunk,
+                  s_reboot_mark.free_heap, s_reboot_mark.free_psram, s_heartbeat);
     Serial.flush();
     esp_restart();
 }

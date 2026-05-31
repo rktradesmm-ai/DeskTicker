@@ -504,9 +504,12 @@ void setup() {
     // and its timing measurable on the serial monitor.
     WdtReboot wr;
     if (render_wdt_consume_last_reboot(&wr)) {
+        // phase: 0=idle/timer-cb, 2=TE sync wait, 3=chunk DMA-done wait,
+        //        4=esp_lcd draw (most likely hang point), 5=flush done, 6=mutex wait
         Serial.printf("[WDT] previous boot ended in a render-watchdog reboot: "
-                      "state=%u freeHeap=%u freePSRAM=%u atEpoch=%lu\n",
-                      wr.last_state, wr.free_heap, wr.free_psram,
+                      "state=%u phase=%u chunk=%u freeHeap=%u freePSRAM=%u atEpoch=%lu\n",
+                      wr.last_state, wr.phase, wr.chunk,
+                      wr.free_heap, wr.free_psram,
                       (unsigned long)wr.reboot_epoch);
     }
 
@@ -562,14 +565,18 @@ void loop() {
     if (millis() - last_health_ms >= 60000) {
         last_health_ms = millis();
         uint32_t hb = render_wdt_heartbeat();
+        // phase: 0=idle, 2=TE wait, 3=DMA-done wait, 4=esp_lcd draw, 5=done, 6=mutex wait
         Serial.printf("[health] state=%d freeHeap=%u freePSRAM=%u largestPSRAM=%u "
-                      "renderHB=%u (+%u/min) flushTO=%u teTO=%u\n",
+                      "renderHB=%u (+%u/min) flushTO=%u teTO=%u lockTO=%u phase=%u chunk=%u\n",
                       (int)state, (unsigned)ESP.getFreeHeap(),
                       (unsigned)ESP.getFreePsram(),
                       (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM),
                       (unsigned)hb, (unsigned)(hb - last_hb),
                       (unsigned)lvgl_port_flush_timeouts,
-                      (unsigned)bsp_te_sync_timeouts);
+                      (unsigned)bsp_te_sync_timeouts,
+                      (unsigned)lvgl_lock_timeouts,
+                      (unsigned)lvgl_render_phase,
+                      (unsigned)lvgl_render_chunk);
         last_hb = hb;
     }
 

@@ -165,6 +165,17 @@ void lvgl_port_unlock(void);
  */
 extern volatile uint32_t lvgl_port_flush_timeouts;
 
+/* Counts render-loop lock acquisitions that timed out (mutex held too long elsewhere).
+ * The render task skips that frame instead of freezing. Surfaced as lockTO in [health]. */
+extern volatile uint32_t lvgl_lock_timeouts;
+
+/* Render-phase locator: which step the render task is in (0=idle,1=lock,2=TE,3=wait-DMA,
+ * 4=inside precompiled esp_lcd draw,5=done,6=acquiring render-loop lock) and the current
+ * flush chunk index. Stashed across a watchdog reboot so the next freeze names the exact
+ * stuck line, and surfaced live in [health]. */
+extern volatile uint8_t  lvgl_render_phase;
+extern volatile uint8_t  lvgl_render_chunk;
+
 #ifdef __cplusplus
 }
 #endif

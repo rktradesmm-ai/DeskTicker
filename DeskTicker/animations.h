@@ -43,6 +43,11 @@ typedef struct {
     uint32_t free_heap;    // bytes free at reboot
     uint32_t free_psram;   // bytes free at reboot
     uint32_t reboot_epoch; // time(nullptr) at reboot (0 if NTP not synced)
+    // Render-phase locator: pinpoints the exact step the render task was stuck in.
+    // Decode: 0=idle/timer-cb, 2=TE sync wait, 3=chunk DMA-done wait, 4=esp_lcd draw
+    //         (the precompiled call — most likely hang point), 5=flush done, 6=mutex wait
+    uint8_t  phase;        // lvgl_render_phase at the moment of reboot
+    uint8_t  chunk;        // lvgl_render_chunk at the moment of reboot
 } WdtReboot;
 
 // Arm the watchdog + start its feed timer. Call once in setup(), under LV_LOCK,
