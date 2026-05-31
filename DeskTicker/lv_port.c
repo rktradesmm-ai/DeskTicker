@@ -59,6 +59,11 @@ volatile uint32_t lvgl_lock_timeouts = 0;
 volatile uint8_t  lvgl_render_phase = 0;
 volatile uint8_t  lvgl_render_chunk = 0;
 
+// When true, the flush callback returns immediately without QSPI DMA (display frozen).
+// Set around api_fetch() to block the WiFi receive DMA / QSPI display DMA race while
+// keeping lv_timer_handler() — and therefore the render watchdog feed timer — running.
+volatile bool lvgl_flush_suspended = false;
+
 /*******************************************************************************
 * Types definitions
 *******************************************************************************/
@@ -470,6 +475,13 @@ static void lvgl_port_flush_callback(lv_disp_drv_t *drv, const lv_area_t *area, 
     assert(drv != NULL);
     lvgl_port_display_ctx_t *disp_ctx = (lvgl_port_display_ctx_t *)drv->user_data;
     assert(disp_ctx != NULL);
+
+    // If DMA is suspended (e.g. during HTTP fetch), acknowledge the flush without
+    // sending to the display. The LVGL timer system keeps running normally.
+    if (lvgl_flush_suspended) {
+        lv_disp_flush_ready(drv);
+        return;
+    }
 
     const int x_start = area->x1;
     const int x_end = area->x2;

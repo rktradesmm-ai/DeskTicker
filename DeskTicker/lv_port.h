@@ -194,6 +194,12 @@ extern volatile uint32_t lvgl_lock_timeouts;
 extern volatile uint8_t  lvgl_render_phase;
 extern volatile uint8_t  lvgl_render_chunk;
 
+/* When true, flush callbacks return immediately without QSPI DMA (display frozen at
+ * last rendered frame). Set around api_fetch() to prevent WiFi receive DMA from racing
+ * with QSPI display DMA on the shared AHB bus. lv_timer_handler() keeps running
+ * normally so the render watchdog feed timer is unaffected. */
+extern volatile bool lvgl_flush_suspended;
+
 #ifdef __cplusplus
 }
 #endif

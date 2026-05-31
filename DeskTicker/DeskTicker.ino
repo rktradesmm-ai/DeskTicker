@@ -684,17 +684,19 @@ void loop() {
             if (LV_LOCK()) { chart_screen_set_status(stsmsg); LV_UNLOCK(); }
         }
 
-        // Pause LVGL rendering during the HTTP fetch to prevent the WiFi receive DMA
-        // from racing with the QSPI display DMA. Both share the internal AHB bus; overlap
-        // causes the QSPI DMA completion interrupt to be lost → render task hangs forever
-        // inside panel_axs15231b_draw_bitmap() (phase=4 or phase=7 in the freeze logs).
-        // lvgl_port_stop() disables the LVGL tick timer → lv_timer_handler() returns
-        // immediately → no flush callbacks → no QSPI DMA during WiFi receive. The display
-        // shows the previous frame while the fetch runs (~0.5-2 s), then resumes normally.
-        render_wdt_keepalive();              // reset 5s countdown (feed timer is paused below)
-        lvgl_port_stop();
+        // Barrier: wait for one render task cycle so the "Fetching..." status label
+        // is flushed to the display before we suspend DMA. The render task (priority 4)
+        // preempts the main loop (priority 1) immediately after the LV_UNLOCK() above,
+        // flushes the dirty label, then sleeps — this second lock waits for that cycle.
+        if (LV_LOCK()) { LV_UNLOCK(); }
+
+        // Suppress QSPI DMA during the HTTP fetch (prevents WiFi receive DMA from racing
+        // with QSPI display DMA on the shared AHB bus). Unlike lvgl_port_stop(), this
+        // flag leaves lv_timer_handler() running: the render watchdog feed timer keeps
+        // firing every 1s → no false watchdog reboots on slow or retried fetches.
+        lvgl_flush_suspended = true;
         bool ok = api_fetch(&cfg, cur_idx, &asset_data[cur_idx]);
-        lvgl_port_resume();
+        lvgl_flush_suspended = false;
         Serial.printf("[fetch] %s: %s\n", cfg.assets[cur_idx],
                       ok ? "OK" : asset_data[cur_idx].err);
         // Always call hide_connecting — no-op when conn_scr is null, but correctly
