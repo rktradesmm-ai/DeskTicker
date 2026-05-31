@@ -318,20 +318,24 @@ after-hours only before 2026-05-30). `anim_start`/`anim_stop` no longer touch it
 reboot…`; a `[health]` line every 60 s logs heap/PSRAM/heartbeat. Being always-on, it also
 retires the old "watchdog never runs >5 min" soak-test caveat.
 
-**Display-flush deadlock — investigation in progress:** the chart hangs with `flushTO=0
-teTO=0` (soak data `freezeTest1.txt`, 2026-05-31), meaning the freeze is NOT in the two
-bounded waits we added. Leading suspect: inside `esp_lcd_panel_draw_bitmap()` at
-`lv_port.c:580` — that call enters the precompiled `esp_lcd` component which has its own
-internal descriptor/bus semaphore we cannot see or bound. Diagnostics added this round:
-- **`lvgl_render_phase`** (0–6) and **`lvgl_render_chunk`** mark the exact step the
-  render task is at; stashed to RTC RAM before each watchdog reboot and shown in `[WDT]
-  previous boot` as `phase=`/`chunk=` so the NEXT freeze tells us the stuck line.
-- **`lvgl_lock_timeouts`** (`lockTO=`) counts render-loop mutex timeouts (was unbounded).
-- `[health]` now shows `flushTO=`/`teTO=`/`lockTO=`/`phase=`/`chunk=`.
-Phase decode: 0=idle, 2=TE wait, 3=chunk DMA-done wait, **4=inside `esp_lcd_panel_draw_bitmap`
-(most likely hang point)**, 5=flush done, 6=mutex wait. LVGL upgrade would NOT fix this
-(bug is below LVGL; LVGL-9 port would need a full rewrite). Core stays 3.0.7;
-`full_refresh` stays 1. See `BISECT_LOG.md` 2026-05-31 entry.
+**Display-flush deadlock — root cause confirmed, mitigation in progress:**
+`freezeTest2.txt` (`phase=4 chunk=3`, `flushTO=0 teTO=0 lockTO=0`) confirms the hang
+is inside `panel_axs15231b_draw_bitmap()` in `esp_lcd_axs15231b.c`. Either the `tx_param`
+(CASET column-address command send) or `tx_color` (RAMWR/RAMWRC pixel DMA) blocks
+forever when the SPI DMA interrupt is lost under WiFi + JSON pressure. Both go into
+precompiled `esp_lcd_panel_io_tx_*` functions with `portMAX_DELAY` waits we cannot bound.
+
+Current mitigation layers:
+- **Watchdog reduced to 5s** (was 30s) — freeze visible for ≤5s before reboot.
+- **Phase/chunk in RTC RAM** — `[WDT] previous boot` prints `phase=`/`chunk=`.
+- **Sub-phase 7 added**: `phase=7` = stuck in CASET tx_param (command SPI send);
+  `phase=4` = stuck in tx_color pixel DMA. Next freeze will distinguish the two paths.
+- `[health]` every 60 s: `flushTO= teTO= lockTO= phase= chunk=`.
+
+Phase decode: 0=idle, 2=TE wait (→teTO), 3=DMA-done wait (→flushTO), 4=tx_color
+pixel DMA, 5=flush done, 6=mutex wait (→lockTO), **7=tx_param CASET cmd**.
+LVGL upgrade would NOT fix this (bug is in precompiled SPI driver below LVGL).
+Core stays **3.0.7**; `full_refresh` stays 1. See `BISECT_LOG.md` 2026-05-31 entry.
 
 ---
 

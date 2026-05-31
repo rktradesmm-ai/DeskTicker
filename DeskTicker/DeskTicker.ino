@@ -504,8 +504,8 @@ void setup() {
     // and its timing measurable on the serial monitor.
     WdtReboot wr;
     if (render_wdt_consume_last_reboot(&wr)) {
-        // phase: 0=idle/timer-cb, 2=TE sync wait, 3=chunk DMA-done wait,
-        //        4=esp_lcd draw (most likely hang point), 5=flush done, 6=mutex wait
+        // phase: 0=idle  2=TE wait  3=DMA-done wait  4=tx_color pixel DMA (freezeTest2)
+        //        5=flush done  6=mutex wait  7=tx_param CASET cmd (new sub-phase)
         Serial.printf("[WDT] previous boot ended in a render-watchdog reboot: "
                       "state=%u phase=%u chunk=%u freeHeap=%u freePSRAM=%u atEpoch=%lu\n",
                       wr.last_state, wr.phase, wr.chunk,
@@ -565,7 +565,8 @@ void loop() {
     if (millis() - last_health_ms >= 60000) {
         last_health_ms = millis();
         uint32_t hb = render_wdt_heartbeat();
-        // phase: 0=idle, 2=TE wait, 3=DMA-done wait, 4=esp_lcd draw, 5=done, 6=mutex wait
+        // phase: 0=idle  2=TE wait  3=DMA-done wait  4=tx_color pixel DMA  5=done
+        //        6=mutex wait  7=tx_param CASET cmd
         Serial.printf("[health] state=%d freeHeap=%u freePSRAM=%u largestPSRAM=%u "
                       "renderHB=%u (+%u/min) flushTO=%u teTO=%u lockTO=%u phase=%u chunk=%u\n",
                       (int)state, (unsigned)ESP.getFreeHeap(),

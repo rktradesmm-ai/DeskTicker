@@ -29,6 +29,11 @@
 
 static const char *TAG = "lcd_panel.axs15231b";
 
+// Phase locator from lv_port.c — allows panel_axs15231b_draw_bitmap to split phase=4
+// into 7=CASET command send vs 4=RAMWR/RAMWRC pixel DMA, so the next watchdog reboot
+// log distinguishes which precompiled esp_lcd_panel_io sub-call is actually blocking.
+extern volatile uint8_t lvgl_render_phase;
+
 static esp_err_t panel_axs15231b_del(esp_lcd_panel_t *panel);
 static esp_err_t panel_axs15231b_reset(esp_lcd_panel_t *panel);
 static esp_err_t panel_axs15231b_init(esp_lcd_panel_t *panel);
@@ -296,6 +301,9 @@ static esp_err_t panel_axs15231b_draw_bitmap(esp_lcd_panel_t *panel, int x_start
     y_end += axs15231b->y_gap;
 
     // define an area of frame memory where MCU can access
+    // phase=7: inside tx_param (CASET command send via precompiled esp_lcd_panel_io_tx_param).
+    // If next freeze shows phase=7, the SPI command path is stuck (not the color DMA).
+    lvgl_render_phase = 7;
     tx_param(axs15231b, io, LCD_CMD_CASET, (uint8_t[]) {
         (x_start >> 8) & 0xFF,
         x_start & 0xFF,
@@ -313,6 +321,10 @@ static esp_err_t panel_axs15231b_draw_bitmap(esp_lcd_panel_t *panel, int x_start
     }
 
     // transfer frame buffer
+    // phase=4: inside tx_color (RAMWR/RAMWRC pixel DMA via precompiled esp_lcd_panel_io_tx_color).
+    // If next freeze shows phase=4, the SPI DMA path is stuck (not the command send above).
+    // freezeTest2.txt showed phase=4 chunk=3 — the previous soak stuck here.
+    lvgl_render_phase = 4;
     size_t len = (x_end - x_start) * (y_end - y_start) * axs15231b->fb_bits_per_pixel / 8;
     if (y_start == 0) {
         tx_color(axs15231b, io, LCD_CMD_RAMWR, color_data, len);//2C

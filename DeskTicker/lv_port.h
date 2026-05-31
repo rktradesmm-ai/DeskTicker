@@ -169,10 +169,13 @@ extern volatile uint32_t lvgl_port_flush_timeouts;
  * The render task skips that frame instead of freezing. Surfaced as lockTO in [health]. */
 extern volatile uint32_t lvgl_lock_timeouts;
 
-/* Render-phase locator: which step the render task is in (0=idle,1=lock,2=TE,3=wait-DMA,
- * 4=inside precompiled esp_lcd draw,5=done,6=acquiring render-loop lock) and the current
- * flush chunk index. Stashed across a watchdog reboot so the next freeze names the exact
- * stuck line, and surfaced live in [health]. */
+/* Render-phase locator: which step the render task is in, and the current flush chunk
+ * index. Stashed across a watchdog reboot so the next freeze names the exact stuck line;
+ * surfaced live in [health].
+ * Values: 0=idle/timer-cb, 2=TE sync wait (→teTO), 3=chunk DMA-done wait (→flushTO),
+ *         4=inside tx_color (RAMWR/RAMWRC pixel DMA — stuck here in freezeTest2.txt),
+ *         5=flush done, 6=render-loop mutex wait (→lockTO),
+ *         7=inside tx_param (CASET column-addr command send — new sub-phase locator). */
 extern volatile uint8_t  lvgl_render_phase;
 extern volatile uint8_t  lvgl_render_chunk;
 

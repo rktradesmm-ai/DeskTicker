@@ -11,7 +11,7 @@
 
 // ── Render-task liveness watchdog (always-on) ─────────────────────────────────
 // Independent hardware timer (esp_timer, NOT an LVGL timer) that reboots the
-// device if the LVGL render task stops producing frames for 30 seconds. Because it
+// device if the LVGL render task stops producing frames for 5 seconds. Because it
 // runs via the esp_timer task — not the LVGL render task — it fires even when LVGL
 // is frozen in a QSPI DMA / tearing-effect semaphore wait (the silent display
 // deadlock documented in BISECT_LOG.md).
@@ -36,7 +36,7 @@ static volatile uint8_t   s_last_state = 0xFF;  // last main-loop State, for cra
 RTC_DATA_ATTR static WdtReboot s_reboot_mark;
 
 static void wdt_fire(void*) {
-    // No render frame in 30 s — the LVGL render task is deadlocked. Record what the
+    // No render frame in 5 s — the LVGL render task is deadlocked. Record what the
     // device was doing so the NEXT boot can report it (RTC RAM survives esp_restart),
     // then reboot.
     s_reboot_mark.magic        = WDT_MAGIC;
@@ -48,7 +48,7 @@ static void wdt_fire(void*) {
     // 4=esp_lcd draw — most likely stuck point, 5=flush done, 6=mutex wait).
     s_reboot_mark.phase        = lvgl_render_phase;
     s_reboot_mark.chunk        = lvgl_render_chunk;
-    Serial.printf("[WDT] render watchdog: no frame in 30s, rebooting "
+    Serial.printf("[WDT] render watchdog: no frame in 5s, rebooting "
                   "(state=%u phase=%u chunk=%u heap=%u psram=%u hb=%u)\n",
                   s_last_state, s_reboot_mark.phase, s_reboot_mark.chunk,
                   s_reboot_mark.free_heap, s_reboot_mark.free_psram, s_heartbeat);
@@ -66,13 +66,13 @@ static void wdt_start() {
         .skip_unhandled_events = false
     };
     if (esp_timer_create(&args, &s_wdt) == ESP_OK)
-        esp_timer_start_once(s_wdt, 30ULL * 1000 * 1000); // 30 s in µs
+        esp_timer_start_once(s_wdt, 5ULL * 1000 * 1000);  // 5 s in µs
 }
 
 static void wdt_feed() {
     if (!s_wdt) return;
-    // Reset the 30-second countdown — we are alive and rendering.
-    esp_timer_restart(s_wdt, 30ULL * 1000 * 1000);
+    // Reset the 5-second countdown — we are alive and rendering.
+    esp_timer_restart(s_wdt, 5ULL * 1000 * 1000);
 }
 
 // ── Swipe / gesture state ─────────────────────────────────────────────────────
@@ -1893,7 +1893,7 @@ void render_wdt_init() {
     wdt_start();                                   // arm the 30 s esp_timer (idempotent)
     if (!s_feed_timer)
         s_feed_timer = lv_timer_create(render_feed_cb, 1000, nullptr);  // feed every 1 s
-    Serial.println("[WDT] render watchdog armed (always-on, 30s)");
+    Serial.println("[WDT] render watchdog armed (always-on, 5s)");
 }
 
 // Record the current main-loop State so a watchdog reboot can log where it hung.

@@ -217,6 +217,63 @@ non-zero `flushTO`/`teTO` are the recovered events. To prove recovery quickly, t
 drop the two timeouts to ~5 ms, confirm the UI keeps running while the counters climb,
 then restore 100 ms.
 
+## Phase=4 confirmed — watchdog to 5s + sub-phase locator — 2026-05-31
+
+### Soak 1 (`freezeTest1.txt`): bounded waits did NOT catch the freeze
+
+Flashed `493c2c9` (bounded `flushTO`/`teTO` waits). Chart hung, watchdog rebooted.
+Key from the log: `flushTO=0 teTO=0` at reboot. Neither of the two bounded waits
+we added ever fired. The render task froze somewhere else, with all phase=3 and
+teTO=2 paths clear. The bounded waits are correct defensive code but are not on
+the critical path for this hang.
+
+→ Added render-phase locator (`lvgl_render_phase`, `lvgl_render_chunk`) and bounded
+render-loop mutex acquire (`lockTO`) — commit `830d7fb`.
+
+### Soak 2 (`freezeTest2.txt`): **`phase=4 chunk=3` — root cause nailed**
+
+```
+[health] state=5 ... flushTO=0 teTO=0 lockTO=0 phase=4 chunk=3
+[WDT] render watchdog: no frame in 30s, rebooting (state=5 phase=4 chunk=3 ...)
+```
+
+**All suspects but one are now ruled out:**
+- `flushTO=0` → our bounded `trans_done_sem` wait (phase 3) never triggered
+- `teTO=0`   → our bounded TE sync wait (phase 2) never triggered
+- `lockTO=0` → our bounded render-loop mutex acquire (phase 6) never triggered
+- **`phase=4 chunk=3` → render task was stuck inside `esp_lcd_panel_draw_bitmap()`
+  at `lv_port.c:580`, specifically in chunk 3's call, for the full 30 s watchdog window**
+
+**What happens inside `esp_lcd_panel_draw_bitmap()` (`esp_lcd_axs15231b.c:287`):**
+
+```c
+// A: CASET command send — precompiled esp_lcd_panel_io_tx_param (portMAX_DELAY inside)
+tx_param(axs15231b, io, LCD_CMD_CASET, ...);
+// B: pixel DMA transfer — precompiled esp_lcd_panel_io_tx_color (portMAX_DELAY inside)
+tx_color(axs15231b, io, LCD_CMD_RAMWR/RAMWRC, color_data, len);
+```
+
+Both sub-calls go into precompiled `esp_lcd_panel_io_tx_*` functions that contain their
+own `spi_device_queue_trans(portMAX_DELAY)` / `spi_device_get_trans_result(portMAX_DELAY)`
+waits. If the SPI DMA interrupt is lost under bus pressure (WiFi reconnect + 21 KB JSON
+parse), either blocks forever — our `trans_done_sem` ISR path is not involved, so
+`flushTO` stays 0.
+
+**Phase=4 covered the whole function.** We do not yet know whether sub-call A (CASET
+command) or B (RAMWR/RAMWRC pixel DMA) is the specific blocking point.
+
+### Actions taken — 2026-05-31
+
+1. **Watchdog reduced from 30s → 5s** (`animations.cpp` `wdt_start()`/`wdt_feed()`).
+   The render task feeds every 1s; 5s gives 5× headroom with no false-fire risk.
+   Effect: freeze duration drops from 30s to ≤5s.
+
+2. **Sub-phase marker added in `panel_axs15231b_draw_bitmap`:**
+   - `phase=7` set before `tx_param` (CASET command send)
+   - `phase=4` set before `tx_color` (RAMWR/RAMWRC pixel DMA)
+   Next freeze will say `phase=7` (CASET is stuck) or `phase=4` (pixel DMA is stuck).
+   This is the final remaining unknown.
+
 ## Known separate bugs (not hang-related)
 - **QQQ/commodities unavailable during US market hours:** Likely caused
   by UTC+8 timezone setting shifting the market-hours check by ~12 h.
