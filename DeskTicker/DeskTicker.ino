@@ -675,20 +675,23 @@ void loop() {
             snprintf(msg, sizeof(msg), "Fetching %s...", cfg.assets[cur_idx]);
             show_connecting(msg);
         } else {
-            // Chart stays visible — show a loading hint in the header status label.
-            // Exactly ONE locked write here; the clear is folded into the final
-            // chart_screen_update() lock below (no standalone clear = no extra flush
-            // in the vendor TE-sync race window that previously froze the device).
+            // Chart stays visible — show a loading hint in the status label, then
+            // synchronously paint it with lv_refr_now() while we still hold the lock.
+            // The render task is blocked on the same recursive mutex, so we have
+            // exclusive display access and the flush callback runs inline here. This
+            // MUST happen before lvgl_flush_suspended freezes the display below — a plain
+            // set + unlock is not enough, because the async render task may never paint
+            // the label before suspension (the screen would jump straight from the old
+            // frame to the new chart, and "Fetching..." would never appear). WiFi is idle
+            // at this point, so this one flush cannot hit the WiFi/QSPI DMA race.
             char stsmsg[28];
             snprintf(stsmsg, sizeof(stsmsg), "Fetching %s...", cfg.assets[cur_idx]);
-            if (LV_LOCK()) { chart_screen_set_status(stsmsg); LV_UNLOCK(); }
+            if (LV_LOCK()) {
+                chart_screen_set_status(stsmsg);
+                lv_refr_now(NULL);
+                LV_UNLOCK();
+            }
         }
-
-        // Barrier: wait for one render task cycle so the "Fetching..." status label
-        // is flushed to the display before we suspend DMA. The render task (priority 4)
-        // preempts the main loop (priority 1) immediately after the LV_UNLOCK() above,
-        // flushes the dirty label, then sleeps — this second lock waits for that cycle.
-        if (LV_LOCK()) { LV_UNLOCK(); }
 
         // Suppress QSPI DMA during the HTTP fetch (prevents WiFi receive DMA from racing
         // with QSPI display DMA on the shared AHB bus). Unlike lvgl_port_stop(), this
