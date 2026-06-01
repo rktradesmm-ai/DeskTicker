@@ -446,22 +446,42 @@ static bool yf_try_host(const char* host, const char* ticker, const char* interv
             out->candle_count++;
         }
     } else {
-        int start = (raw > MAX_CANDLES) ? raw - MAX_CANDLES : 0;
-        for (int i = start; i < raw && out->candle_count < MAX_CANDLES; i++) {
+        // Keep the most recent MAX_CANDLES *valid* bars. Scanning ALL raw bars forward
+        // and filtering nulls BEFORE capping at 60 means the window reaches back across
+        // weekends/holidays into real candles — so the chart fills instead of leaving a
+        // blank left strip when the market was recently closed.
+        // Implementation: ring-write into candles[], then rotate so the array is ordered
+        // oldest → newest (the renderer and % change code both expect candles[0] = oldest,
+        // candles[candle_count-1] = newest).
+        int valid = 0;
+        for (int i = 0; i < raw; i++) {
             float o = opens[i]  | 0.0f;
             float h = highs[i]  | 0.0f;
             float l = lows[i]   | 0.0f;
             float c = closes[i] | 0.0f;
             if (o < 0.0001f && c < 0.0001f) continue;
             if (!isfinite(o) || !isfinite(h) || !isfinite(l) || !isfinite(c)) continue;
-            int ci = out->candle_count;
-            out->candles[ci].open   = o;
-            out->candles[ci].high   = h;
-            out->candles[ci].low    = l;
-            out->candles[ci].close  = c;
-            out->candles[ci].ts     = ts[i] | 0;
-            out->candles[ci].volume = (long)(vols[i] | 0.0f);
-            out->candle_count++;
+            int slot = valid % MAX_CANDLES;      // ring write: overwrites oldest when full
+            out->candles[slot].open   = o;
+            out->candles[slot].high   = h;
+            out->candles[slot].low    = l;
+            out->candles[slot].close  = c;
+            out->candles[slot].ts     = ts[i] | 0;
+            out->candles[slot].volume = (long)(vols[i] | 0.0f);
+            valid++;
+        }
+        out->candle_count = (valid < MAX_CANDLES) ? valid : MAX_CANDLES;
+        // If we wrapped, index 0 holds the (valid % MAX_CANDLES)-th bar, not the oldest.
+        // Rotate left so candles[0] = oldest again.
+        if (valid > MAX_CANDLES) {
+            int head = valid % MAX_CANDLES;
+            if (head != 0) {
+                Candle tmp[MAX_CANDLES];
+                for (int k = 0; k < MAX_CANDLES; k++)
+                    tmp[k] = out->candles[(head + k) % MAX_CANDLES];
+                for (int k = 0; k < MAX_CANDLES; k++)
+                    out->candles[k] = tmp[k];
+            }
         }
     }
 
