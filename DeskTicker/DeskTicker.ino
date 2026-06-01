@@ -232,6 +232,12 @@ static void show_connecting(const char* msg) {
         cleanup_pending_scr();
     }
     lv_label_set_text(conn_lbl, msg);
+    // Paint the connecting screen synchronously, while we hold the lock, so it is on
+    // the display before the caller suspends DMA (lvgl_flush_suspended) for the HTTP
+    // fetch. A plain set + unlock relies on the async render task (Core 1), which never
+    // gets to flush before suspension — that is why "Fetching..." vanished when swiping
+    // from the after-hours animation. WiFi is idle here, so this flush is race-free.
+    lv_refr_now(NULL);
     LV_UNLOCK();
 }
 
