@@ -8,6 +8,7 @@
 #include "esp_timer.h"
 #include <time.h>          // time() for the watchdog reboot timestamp
 #include "lv_port.h"       // lvgl_render_phase / lvgl_render_chunk (phase locator)
+#include "sdlog.h"         // mirror [WDT] reboot line to SD before esp_restart()
 
 // ── Render-task liveness watchdog (always-on) ─────────────────────────────────
 // Independent hardware timer (esp_timer, NOT an LVGL timer) that reboots the
@@ -48,11 +49,14 @@ static void wdt_fire(void*) {
     // 4=esp_lcd draw — most likely stuck point, 5=flush done, 6=mutex wait).
     s_reboot_mark.phase        = lvgl_render_phase;
     s_reboot_mark.chunk        = lvgl_render_chunk;
-    Serial.printf("[WDT] render watchdog: no frame in 5s, rebooting "
-                  "(state=%u phase=%u chunk=%u heap=%u psram=%u hb=%u)\n",
-                  s_last_state, s_reboot_mark.phase, s_reboot_mark.chunk,
-                  s_reboot_mark.free_heap, s_reboot_mark.free_psram, s_heartbeat);
+    sdlog_printf("[WDT] render watchdog: no frame in 5s, rebooting "
+                 "(state=%u phase=%u chunk=%u heap=%u psram=%u hb=%u)\n",
+                 s_last_state, s_reboot_mark.phase, s_reboot_mark.chunk,
+                 s_reboot_mark.free_heap, s_reboot_mark.free_psram, s_heartbeat);
     Serial.flush();
+    // Persist the reboot-cause line to the SD card before we reset, so an unattended
+    // overnight reboot leaves a record even though the next boot's RTC line also reports it.
+    sdlog_flush_blocking();
     esp_restart();
 }
 
@@ -1900,7 +1904,7 @@ void render_wdt_init() {
     wdt_start();                                   // arm the 30 s esp_timer (idempotent)
     if (!s_feed_timer)
         s_feed_timer = lv_timer_create(render_feed_cb, 1000, nullptr);  // feed every 1 s
-    Serial.println("[WDT] render watchdog armed (always-on, 5s)");
+    sdlog_println("[WDT] render watchdog armed (always-on, 5s)");
 }
 
 // Record the current main-loop State so a watchdog reboot can log where it hung.

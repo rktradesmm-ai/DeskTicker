@@ -6,6 +6,7 @@
 #include <math.h>
 #include <time.h>
 #include "api_client.h"
+#include "sdlog.h"   // mirror [YF] logs to the SD card
 
 // ══════════════════════════════════════════════════════════════════════════════
 // YAHOO FINANCE  (stocks, ETFs, commodities, forex, crypto — all assets)
@@ -191,7 +192,7 @@ static float fetch_crypto_today_open(const char* host, const char* ticker) {
         "https://%s/v8/finance/chart/%s"
         "?interval=15m&period1=%ld&period2=%ld&includePrePost=false",
         host, ticker, (long)today_midnight, (long)now);
-    Serial.printf("[YF] anchor GET %s\n", url);
+    sdlog_printf("[YF] anchor GET %s\n", url);
 
     WiFiClientSecure client;
     client.setInsecure();
@@ -231,7 +232,7 @@ static float fetch_crypto_today_open(const char* host, const char* ticker) {
     for (JsonVariant v : opens) {
         float o = v | 0.0f;
         if (isfinite(o) && o > 0.0001f) {
-            Serial.printf("[YF] anchor %s open=%.4f\n", ticker, (double)o);
+            sdlog_printf("[YF] anchor %s open=%.4f\n", ticker, (double)o);
             return o;
         }
     }
@@ -248,7 +249,7 @@ static bool yf_try_host(const char* host, const char* ticker, const char* interv
         "https://%s/v8/finance/chart/%s"
         "?interval=%s&period1=%ld&period2=%ld&includePrePost=false",
         host, ticker, interval, (long)period1, (long)period2);
-    Serial.printf("[YF] GET %s\n", url);
+    sdlog_printf("[YF] GET %s\n", url);
 
     WiFiClientSecure client;
     client.setInsecure();
@@ -272,7 +273,7 @@ static bool yf_try_host(const char* host, const char* ticker, const char* interv
     http.addHeader("Referer",         "https://finance.yahoo.com/");
 
     int code = http.GET();
-    Serial.printf("[YF] %s HTTP %d\n", ticker, code);
+    sdlog_printf("[YF] %s HTTP %d\n", ticker, code);
     if (code != 200) {
         snprintf(out->err, sizeof(out->err), "YF HTTP %d", code);
         http.end();
@@ -290,7 +291,7 @@ static bool yf_try_host(const char* host, const char* ticker, const char* interv
         out->valid = false;
         return false;
     }
-    Serial.printf("[YF] body %u bytes\n", (unsigned)resp.length());
+    sdlog_printf("[YF] body %u bytes\n", (unsigned)resp.length());
 
     StaticJsonDocument<512> filter;
     filter["chart"]["result"][0]["meta"]["regularMarketPrice"] = true;
@@ -328,7 +329,7 @@ static bool yf_try_host(const char* host, const char* ticker, const char* interv
     if (!doc["chart"]["error"].isNull()) {
         const char* ec = doc["chart"]["error"]["code"]        | "?";
         const char* ed = doc["chart"]["error"]["description"] | "";
-        Serial.printf("[YF] API error: %s — %s\n", ec, ed);
+        sdlog_printf("[YF] API error: %s — %s\n", ec, ed);
     }
 
     JsonArray results = doc["chart"]["result"];
@@ -511,7 +512,7 @@ static bool yf_try_host(const char* host, const char* ticker, const char* interv
                     ? (out->price - prev_close_for_pct) / prev_close_for_pct * 100.0f
                     : 0.0f;
 
-    Serial.printf("[YF] %s OK price=%.4f prev=%.4f chg=%.2f%% candles=%d state=%s\n",
+    sdlog_printf("[YF] %s OK price=%.4f prev=%.4f chg=%.2f%% candles=%d state=%s\n",
                   ticker, (double)out->price, (double)prev_close_for_pct,
                   (double)out->change_pct, out->candle_count, ms);
 
@@ -538,7 +539,7 @@ static bool api_fetch_yahoo(const Settings* s, const AssetDef* def, AssetData* o
             strncmp(out->err, "YF JSON:",       8) == 0 ||
             strncmp(out->err, "YF: empty",      9) == 0 ||
             strncmp(out->err, "YF: 0 candles", 13) == 0) {
-            Serial.printf("[YF] %s: primary failed (%s), trying fallback\n",
+            sdlog_printf("[YF] %s: primary failed (%s), trying fallback\n",
                           def->yahoo, out->err);
             ok = yf_try_host(YF_HOST_FALLBACK, def->yahoo, interval, p1, s->timeframe, def->market, out);
         }
@@ -564,7 +565,7 @@ static bool api_fetch_yahoo(const Settings* s, const AssetDef* def, AssetData* o
             // Override the change_pct computed inside yf_try_host with the exact anchor.
             out->prev_close = ref;
             out->change_pct = (out->price - ref) / ref * 100.0f;
-            Serial.printf("[YF] %s 1D anchor override prev=%.4f chg=%.2f%%\n",
+            sdlog_printf("[YF] %s 1D anchor override prev=%.4f chg=%.2f%%\n",
                           def->yahoo, (double)ref, (double)out->change_pct);
         }
         // If fetch failed, leave the existing values as-is (graceful fallback).

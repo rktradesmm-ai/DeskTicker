@@ -38,6 +38,7 @@
 #include "chart_screen.h"
 #include "animations.h"
 #include "settings_screen.h"
+#include "sdlog.h"           // SD-card mirror of the serial log (overnight testing)
 
 // ── Config ────────────────────────────────────────────────────────────────────
 #define LVGL_ROTATION     LV_DISP_ROT_90
@@ -482,7 +483,7 @@ static uint32_t secs_to_market_open(int idx) {
 
 // ── Error display ─────────────────────────────────────────────────────────────
 static void show_error(const char* msg) {
-    Serial.printf("[ERROR] %s\n", msg);
+    sdlog_printf("[ERROR] %s\n", msg);
     if (!LV_LOCK()) return;
     lv_obj_t* scr = lv_scr_act();
     lv_obj_t* lbl = lv_label_create(scr);
@@ -496,7 +497,14 @@ static void show_error(const char* msg) {
 // ── Setup ─────────────────────────────────────────────────────────────────────
 void setup() {
     Serial.begin(115200);
-    Serial.println("DeskTicker booting...");
+    // Mount the SD card first so the boot banner and reset reason are captured on the
+    // card for unattended/overnight testing. Falls back to Serial-only if no card.
+    sdlog_init();
+    sdlog_println("DeskTicker booting...");
+    // Record WHY the device booted (POWERON / SW=our watchdog / PANIC / BROWNOUT / ...).
+    // A wake on asset[0] after-hours with reset_reason != SW means a non-watchdog reset
+    // wiped the RTC resume state — this line tells us which.
+    sdlog_printf("[boot] reset_reason=%s\n", reset_reason_str());
 
     // Init display
     bsp_display_cfg_t disp_cfg = {
@@ -505,9 +513,9 @@ void setup() {
         .rotate        = LVGL_ROTATION,
     };
     bsp_display_start_with_config(&disp_cfg);
-    Serial.println("[setup] display init OK");
+    sdlog_println("[setup] display init OK");
     bsp_display_backlight_on();
-    Serial.println("[setup] backlight on");
+    sdlog_println("[setup] backlight on");
 
     // Arm the always-on render-task liveness watchdog now that the display (and its
     // render task) is up. It protects every screen — including the live chart, which
@@ -520,7 +528,7 @@ void setup() {
     if (was_wdt_reboot) {
         // phase: 0=idle  2=TE wait  3=DMA-done wait  4=tx_color pixel DMA (freezeTest2)
         //        5=flush done  6=mutex wait  7=tx_param CASET cmd (new sub-phase)
-        Serial.printf("[WDT] previous boot ended in a render-watchdog reboot: "
+        sdlog_printf("[WDT] previous boot ended in a render-watchdog reboot: "
                       "state=%u phase=%u chunk=%u freeHeap=%u freePSRAM=%u atEpoch=%lu\n",
                       wr.last_state, wr.phase, wr.chunk,
                       wr.free_heap, wr.free_psram,
@@ -531,7 +539,7 @@ void setup() {
 
     // Load settings from NVS
     settings_load(&cfg);
-    Serial.printf("[setup] settings loaded: wifi_ok=%d assets=%d tf=%d brightness=%d\n",
+    sdlog_printf("[setup] settings loaded: wifi_ok=%d assets=%d tf=%d brightness=%d\n",
                   cfg.wifi_ok, cfg.asset_count, cfg.timeframe, cfg.brightness);
     bsp_display_brightness_set(cfg.brightness);
 
@@ -547,7 +555,7 @@ void setup() {
                 break;
             }
         }
-        Serial.printf("[WDT] resuming last view: asset_idx=%d tf=%d\n",
+        sdlog_printf("[WDT] resuming last view: asset_idx=%d tf=%d\n",
                       cur_idx, cfg.timeframe);
     }
 
@@ -555,16 +563,16 @@ void setup() {
     if (cfg.wifi_ok) {
         WiFi.mode(WIFI_STA);
         WiFi.begin(cfg.wifi_ssid, cfg.wifi_pass);
-        Serial.println("[setup] WiFi.begin issued (background)");
+        sdlog_println("[setup] WiFi.begin issued (background)");
     }
 
     show_splash();
-    Serial.println("[setup] splash shown");
+    sdlog_println("[setup] splash shown");
 
     if (!cfg.wifi_ok) {
         state = S_WIFI_SETUP;
     } else if (WiFi.status() == WL_CONNECTED) {
-        Serial.printf("[setup] WiFi up during splash: %s\n",
+        sdlog_printf("[setup] WiFi up during splash: %s\n",
                       WiFi.localIP().toString().c_str());
         state = S_NTP_SYNC;   // skip "Connecting to WiFi..." screen
     } else {
@@ -574,11 +582,16 @@ void setup() {
 
 // ── Loop / State machine ──────────────────────────────────────────────────────
 void loop() {
+    // Flush any queued log lines to the SD card. No-op during a fetch (lvgl_flush_suspended)
+    // so SD I/O never adds bus pressure in the WiFi/QSPI-DMA-sensitive window.
+    sdlog_flush();
+
     // 3-second hold on BOOT button → wipe all settings and return to setup
     if (digitalRead(RESET_BTN_GPIO) == LOW) {
         if (btn_held_since == 0) btn_held_since = millis();
         else if (millis() - btn_held_since >= 3000) {
-            Serial.println("[reset] button held 3 s — clearing settings and rebooting");
+            sdlog_println("[reset] button held 3 s — clearing settings and rebooting");
+            sdlog_flush_blocking();
             settings_clear();
             delay(200);
             ESP.restart();
@@ -597,7 +610,7 @@ void loop() {
         uint32_t hb = render_wdt_heartbeat();
         // phase: 0=idle  2=TE wait  3=DMA-done wait  4=tx_color pixel DMA  5=done
         //        6=mutex wait  7=tx_param CASET cmd
-        Serial.printf("[health] state=%d freeHeap=%u freePSRAM=%u largestPSRAM=%u "
+        sdlog_printf("[health] state=%d freeHeap=%u freePSRAM=%u largestPSRAM=%u "
                       "renderHB=%u (+%u/min) flushTO=%u teTO=%u lockTO=%u phase=%u chunk=%u\n",
                       (int)state, (unsigned)ESP.getFreeHeap(),
                       (unsigned)ESP.getFreePsram(),
@@ -615,9 +628,10 @@ void loop() {
 
     // ── First-time WiFi setup ─────────────────────────────────────────────
     case S_WIFI_SETUP:
-        Serial.println("Entering WiFi setup mode");
+        sdlog_println("Entering WiFi setup mode");
         wifi_setup_run(&cfg);   // blocks until saved & restarts flag set
-        Serial.println("Setup done, rebooting");
+        sdlog_println("Setup done, rebooting");
+        sdlog_flush_blocking();
         ESP.restart();
         break;
 
@@ -625,13 +639,13 @@ void loop() {
     case S_CONNECTING:
         show_connecting("Connecting to WiFi...");
         if (wifi_connect(cfg.wifi_ssid, cfg.wifi_pass, 15000)) {
-            Serial.printf("WiFi connected: %s\n", WiFi.localIP().toString().c_str());
+            sdlog_printf("WiFi connected: %s\n", WiFi.localIP().toString().c_str());
             wifi_retries = 0;
             hide_connecting();
             state = S_NTP_SYNC;
         } else {
             wifi_retries++;
-            Serial.printf("WiFi failed (attempt %d)\n", wifi_retries);
+            sdlog_printf("WiFi failed (attempt %d)\n", wifi_retries);
             if (wifi_retries >= WIFI_RETRY) {
                 // Still show chart if we have cached data, else setup
                 hide_connecting();
@@ -659,7 +673,7 @@ void loop() {
             while (!getLocalTime(&t, 100) && millis() < deadline) delay(100);
             ntp_synced = getLocalTime(&t, 100);
         }
-        Serial.printf("NTP %s\n", ntp_synced ? "OK" : "failed (using device time)");
+        sdlog_printf("NTP %s\n", ntp_synced ? "OK" : "failed (using device time)");
         hide_connecting();
         state = S_FETCH;
         break;
@@ -706,7 +720,7 @@ void loop() {
         lvgl_flush_suspended = true;
         bool ok = api_fetch(&cfg, cur_idx, &asset_data[cur_idx]);
         lvgl_flush_suspended = false;
-        Serial.printf("[fetch] %s: %s\n", cfg.assets[cur_idx],
+        sdlog_printf("[fetch] %s: %s\n", cfg.assets[cur_idx],
                       ok ? "OK" : asset_data[cur_idx].err);
         // Always call hide_connecting — no-op when conn_scr is null, but correctly
         // queues conn_scr for deletion if WiFi reconnect had displaced the chart.
@@ -929,7 +943,7 @@ void loop() {
 
     // ── WiFi lost, try to reconnect ───────────────────────────────────────
     case S_RECONNECT: {
-        Serial.println("WiFi lost, reconnecting...");
+        sdlog_println("WiFi lost, reconnecting...");
         // If the chart is already on screen, attempt a quick silent reconnect
         // without displacing it — just show a small header note. Only fall back
         // to the full "Connecting…" screen if the soft window is exhausted.
@@ -938,7 +952,7 @@ void loop() {
             if (LV_LOCK()) { chart_screen_set_status("Reconnecting..."); LV_UNLOCK(); }
             for (int i = 0; i < RECONNECT_SOFT_TRIES; i++) {
                 if (wifi_connect(cfg.wifi_ssid, cfg.wifi_pass, RECONNECT_SOFT_MS)) {
-                    Serial.println("WiFi reconnected (chart kept visible)");
+                    sdlog_println("WiFi reconnected (chart kept visible)");
                     wifi_retries  = 0;
                     last_fetch_ms = 0;  // force immediate refresh
                     // System time survives a brief drop — skip NTP screen if synced.
@@ -983,6 +997,7 @@ void loop() {
             // setting the result, so the user has a visual cue already.
             settings_screen_get(&settings_work);
             settings_save(&settings_work);
+            sdlog_flush_blocking();
             delay(1500);   // let the on-screen message render
             ESP.restart();
 
