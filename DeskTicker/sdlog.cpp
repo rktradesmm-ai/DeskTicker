@@ -18,6 +18,7 @@
 #define SDLOG_PATH      "/deskticker.log"
 #define SDLOG_PATH_OLD  "/deskticker.old"
 #define SDLOG_MAX_BYTES (10UL * 1024 * 1024)   // rotate at 10 MB
+#define SDLOG_REMOUNT_MS 3000                  // retry mount this often while card is out
 
 // PSRAM-backed FIFO of pending text. 64 KB comfortably covers the gap between flushes
 // even with verbose [health]/[YF] bursts; oldest bytes are dropped if it ever fills.
@@ -31,6 +32,8 @@ static volatile bool s_overflow = false; // set if we dropped bytes (logged once
 static SPIClass s_sdspi(HSPI);
 static bool     s_ready    = false;      // card mounted + file usable
 static uint32_t s_file_sz  = 0;          // current size of deskticker.log
+static bool     s_bus_started = false;   // s_sdspi.begin() done once
+static unsigned long s_last_mount_try = 0; // throttle remount attempts while card is out
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -86,6 +89,33 @@ const char* reset_reason_str() {
 
 // ── public API ────────────────────────────────────────────────────────────────
 
+// (Re)mount the card and open the log so rotation/size tracking is current. Returns true
+// on success. Safe to call repeatedly — used both at init and to recover after the card is
+// pulled and reinserted while the device keeps running. The SPI bus is brought up only
+// once (it stays valid); only the SD/FS layer is torn down and re-init'd on a remount.
+static bool sdlog_try_mount() {
+    if (!s_bus_started) {
+        // 20 MHz is conservative and reliable for logging; the card is on its own bus.
+        s_sdspi.begin(SD_PIN_SCK, SD_PIN_MISO, SD_PIN_MOSI, SD_PIN_CS);
+        s_bus_started = true;
+    } else {
+        SD.end();   // drop stale driver state from a previously-removed card
+    }
+
+    if (!SD.begin(SD_PIN_CS, s_sdspi, 20000000)) {
+        return false;
+    }
+
+    // Record the current size of the log so rotation works across mounts/reboots.
+    File f = SD.open(SDLOG_PATH, FILE_APPEND);
+    if (!f) {
+        return false;
+    }
+    s_file_sz = f.size();
+    f.close();
+    return true;
+}
+
 void sdlog_init() {
     // Allocate the FIFO in PSRAM (falls back to internal RAM if PSRAM is absent).
     s_fifo = (char*)heap_caps_malloc(FIFO_CAP, MALLOC_CAP_SPIRAM);
@@ -96,23 +126,11 @@ void sdlog_init() {
     }
     s_head = s_tail = 0;
 
-    s_sdspi.begin(SD_PIN_SCK, SD_PIN_MISO, SD_PIN_MOSI, SD_PIN_CS);
-    // 20 MHz is conservative and reliable for logging; the card is on its own bus.
-    if (!SD.begin(SD_PIN_CS, s_sdspi, 20000000)) {
-        Serial.println("[sdlog] SD mount failed — Serial-only logging");
-        s_ready = false;
-        return;
-    }
-
-    // Record the current size of the log so rotation works across reboots.
-    File f = SD.open(SDLOG_PATH, FILE_APPEND);
-    if (f) {
-        s_file_sz = f.size();
-        f.close();
+    if (sdlog_try_mount()) {
         s_ready = true;
         Serial.printf("[sdlog] SD ready, %s = %lu bytes\n", SDLOG_PATH, (unsigned long)s_file_sz);
     } else {
-        Serial.println("[sdlog] could not open log file — Serial-only logging");
+        Serial.println("[sdlog] SD mount failed — Serial-only logging (will retry when inserted)");
         s_ready = false;
     }
 }
@@ -156,20 +174,41 @@ static void drain_to_sd() {
         s_overflow = false;
     }
 
-    // Write the queued bytes in up to two contiguous spans (ring may wrap).
+    // Write the queued bytes in up to two contiguous spans (ring may wrap). Advance the
+    // tail only by the bytes actually written, so if the card is pulled mid-write the
+    // unwritten lines stay buffered and are retried after the card is re-mounted.
     uint32_t tail = s_tail, head = s_head;
+    bool short_write = false;
     if (tail != head) {
         if (tail < head) {
-            f.write((const uint8_t*)(s_fifo + tail), head - tail);
-            s_file_sz += head - tail;
+            uint32_t want = head - tail;
+            size_t   wrote = f.write((const uint8_t*)(s_fifo + tail), want);
+            s_file_sz += wrote;
+            s_tail = (tail + wrote) % FIFO_CAP;
+            short_write = (wrote != want);
         } else {
-            f.write((const uint8_t*)(s_fifo + tail), FIFO_CAP - tail);
-            f.write((const uint8_t*)s_fifo, head);
-            s_file_sz += (FIFO_CAP - tail) + head;
+            uint32_t want1 = FIFO_CAP - tail;
+            size_t   wrote1 = f.write((const uint8_t*)(s_fifo + tail), want1);
+            s_file_sz += wrote1;
+            s_tail = (tail + wrote1) % FIFO_CAP;
+            if (wrote1 == want1) {
+                size_t wrote2 = f.write((const uint8_t*)s_fifo, head);
+                s_file_sz += wrote2;
+                s_tail = wrote2;
+                short_write = (wrote2 != head);
+            } else {
+                short_write = true;
+            }
         }
-        s_tail = head;
     }
     f.close();
+
+    // A short write means the card was likely yanked mid-flush — mark not-ready so
+    // sdlog_flush() starts trying to re-mount; the unwritten bytes remain in the FIFO.
+    if (short_write) {
+        s_ready = false;
+        return;
+    }
 
     // Rotate once the active log passes the cap.
     if (s_file_sz >= SDLOG_MAX_BYTES) {
@@ -182,13 +221,32 @@ static void drain_to_sd() {
 void sdlog_flush() {
     // Never touch the SD bus while a fetch has the display suspended — that is the exact
     // window we are protecting from bus contention. The FIFO holds the lines until later.
-    if (!s_ready || lvgl_flush_suspended) return;
+    if (!s_fifo || lvgl_flush_suspended) return;
+
+    // Card not mounted (never inserted, or pulled while running): retry the mount every
+    // few seconds so logging auto-resumes when the card is (re)inserted — no reboot needed.
+    if (!s_ready) {
+        if (millis() - s_last_mount_try >= SDLOG_REMOUNT_MS) {
+            s_last_mount_try = millis();
+            if (sdlog_try_mount()) {
+                s_ready = true;
+                Serial.println("[sdlog] SD re-mounted, resuming logging");
+                drain_to_sd();   // write everything buffered while the card was out
+            }
+        }
+        return;
+    }
     drain_to_sd();
 }
 
 void sdlog_flush_blocking() {
-    // Used right before esp_restart(): still respect the suspend flag (a reboot during a
-    // fetch is rare), but otherwise force the write so the reboot-cause line is persisted.
-    if (!s_ready || lvgl_flush_suspended) return;
+    // Used right before esp_restart(): respect the fetch suspend flag (a reboot during a
+    // fetch is rare). If the card dropped, attempt one immediate re-mount so the final
+    // reboot-cause line can still be persisted when the card is present.
+    if (!s_fifo || lvgl_flush_suspended) return;
+    if (!s_ready) {
+        if (!sdlog_try_mount()) return;
+        s_ready = true;
+    }
     drain_to_sd();
 }
