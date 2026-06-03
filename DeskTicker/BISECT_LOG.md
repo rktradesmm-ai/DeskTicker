@@ -293,31 +293,66 @@ full_refresh flushes at ~50–66 Hz via QSPI DMA. Both DMA streams share the int
 AHB bus. When they collide, the QSPI DMA completion interrupt is lost → render task
 hangs forever inside `panel_axs15231b_draw_bitmap()` (phase=4 or phase=7).
 
-### Fix: `lvgl_port_stop()` / `lvgl_port_resume()` around `api_fetch()` — commit `6e18368`
+### Fix attempt 1 (REVERTED): `lvgl_port_stop()`/`resume()` around `api_fetch()` — `6e18368`
 
-`lvgl_port_stop()` (already in lv_port.c) disables the LVGL tick timer and calls
-`lv_timer_enable(false)`. This makes `lv_timer_handler()` return immediately without
-processing any timers — no flush callbacks fire, no QSPI DMA starts. The WiFi receive
-DMA and QSPI display DMA no longer overlap: **the race condition is eliminated**.
+First approach wrapped `api_fetch()` with `lvgl_port_stop()` / `lvgl_port_resume()`.
+`lvgl_port_stop()` calls `lv_timer_enable(false)`, so `lv_timer_handler()` stops processing
+ALL timers — no flush callbacks, no QSPI DMA → the DMA race is eliminated. BUT it also
+stopped `render_feed_cb`, the render-watchdog feed lv_timer. On a slow/failed fetch (>5 s,
+e.g. HTTP -1 + fallback) the watchdog starved and false-rebooted. `freezeTest4.txt` showed
+`phase=0` reboots (render task idle, not stuck) — the watchdog firing on its own feed gap,
+not a real freeze. A `render_wdt_keepalive()` band-aid only reset the countdown once at the
+start and could not cover an arbitrarily long fetch. **Reverted.**
 
-`lvgl_port_resume()` restarts the tick timer after `api_fetch()` returns; normal
-rendering resumes within milliseconds.
+### Fix attempt 2 (CURRENT, shipping): `lvgl_flush_suspended` flag — commit `b03bc1c`
 
-The display shows the previous frame (frozen) for the ~0.5–2 s fetch duration.
-This is visually unnoticeable — the chart data updates every 30 s anyway.
+Instead of stopping the whole LVGL timer system, suppress ONLY the QSPI DMA output. A
+`volatile bool lvgl_flush_suspended` (in `lv_port.c`, declared in `lv_port.h`) is checked at
+the very top of `lvgl_port_flush_callback()`:
 
-`render_wdt_keepalive()` (new thin wrapper around `wdt_feed()`) is called before
-`lvgl_port_stop()` to reset the 5s watchdog countdown, since the lv_timer feed also
-stops while LVGL is paused.
+```c
+if (lvgl_flush_suspended) { lv_disp_flush_ready(drv); return; }   // ack, no QSPI DMA
+```
 
-**Files changed:** `DeskTicker.ino` (3 lines around api_fetch in S_FETCH),
-`animations.cpp`/`animations.h` (render_wdt_keepalive function).
+`DeskTicker.ino` `S_FETCH` sets it around the one and only `api_fetch()` call:
+```c
+lvgl_flush_suspended = true;
+bool ok = api_fetch(&cfg, cur_idx, &asset_data[cur_idx]);
+lvgl_flush_suspended = false;
+```
+
+Because `lv_timer_handler()` keeps running, the watchdog feed timer keeps firing every 1 s →
+**no false reboots regardless of fetch duration** — while QSPI DMA is still fully suppressed
+during the WiFi receive window, so the DMA race is eliminated. Display shows the previous
+frame for ~0.5–2 s per fetch (unnoticeable at the 30 s refresh).
+
+**This single `S_FETCH` window covers BOTH the live chart AND the after-hours animation** —
+every fetch in the codebase goes through `S_FETCH` (chart swipe, TF change, after-hours
+5-min re-check, after-hours swipe all do `state = S_FETCH`). There is no separate per-screen
+guard to add, and `lvgl_port_stop()` must NOT be reintroduced anywhere.
+
+### Sync status-paint follow-ups (`1b11eb4`, `da01565`)
+
+Because the display is frozen during the fetch, the "Fetching…" hint must be painted
+SYNCHRONOUSLY before the flag is set, or the async render task never shows it (it stays
+buffered, then the frame jumps to the result). Fixed by calling `lv_refr_now(NULL)` while
+holding the LVGL lock:
+- chart path: after `chart_screen_set_status()` (commit `1b11eb4`)
+- after-hours→fetch path: inside `show_connecting()` (commit `da01565`)
+A plain set-label-then-unlock or a double-`LV_LOCK` "barrier" does NOT work on the dual-core
+S3 — the main loop (Core 0) wins the recursive mutex back before the render task (Core 1)
+flushes. `lv_refr_now()` runs the flush inline in the calling task = deterministic.
+
+**Files changed:** `lv_port.c`/`lv_port.h` (flag + callback check), `DeskTicker.ino`
+(flag around fetch + the two sync paints). `lvgl_port_stop()`/`resume()` remain declared in
+`lv_port.h` but are now unused by app code.
 
 All existing backstops remain: bounded waits (flushTO/teTO/lockTO), phase locator, 5s
-watchdog. If the race somehow occurs in a different context, these still catch it.
+watchdog, resume-last-view. If the race somehow recurs, these still catch it.
 
 **Verification:** compile + flash (core 3.0.7). Soak the chart for several days. Success =
-zero `[WDT] render watchdog` reboot messages.
+zero `[WDT] render watchdog` reboot messages. Confirm "Fetching…" shows on swipe from both
+the chart and the after-hours animation, and no false reboot on slow WiFi.
 
 ## Known separate bugs (not hang-related)
 - **QQQ/commodities unavailable during US market hours:** Likely caused
