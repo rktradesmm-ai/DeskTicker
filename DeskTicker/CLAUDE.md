@@ -318,7 +318,8 @@ after-hours only before 2026-05-30). `anim_start`/`anim_stop` no longer touch it
 reboot…`; a `[health]` line every 60 s logs heap/PSRAM/heartbeat. Being always-on, it also
 retires the old "watchdog never runs >5 min" soak-test caveat.
 
-**Display-flush deadlock — ROOT CAUSE FIXED (2026-05-31, final commit `b03bc1c`):**
+**Display-flush deadlock — ROOT CAUSE FIXED (2026-05-31, final commit `b03bc1c`;
+soak-confirmed PASS 2026-06-06, branch merged to `main`):**
 Root cause: `api_fetch()` was called with LVGL rendering running freely (no mutex,
 no pause). While WiFi received the 21 KB JSON response (~50–200 ms of DMA), the LVGL
 render task ran full_refresh flushes at ~50–66 Hz via QSPI DMA. Both share the internal

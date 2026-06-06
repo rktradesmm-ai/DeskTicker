@@ -354,6 +354,13 @@ watchdog, resume-last-view. If the race somehow recurs, these still catch it.
 zero `[WDT] render watchdog` reboot messages. Confirm "Fetching…" shows on swipe from both
 the chart and the after-hours animation, and no false reboot on slow WiFi.
 
+### Soak result — PASSED ✅ (2026-06-06)
+
+Multi-day live-chart soak on core 3.0.7 with the `lvgl_flush_suspended` fix: **no display
+freeze and no `[WDT] render watchdog` reboot observed.** "Fetching…" shows correctly on
+swipe (chart and after-hours), and no false reboot on slow WiFi. The root-cause fix is
+confirmed effective. Branch `fix/chart-hang-watchdog` merged to `main` on 2026-06-06.
+
 ## Known separate bugs (not hang-related)
 - **QQQ/commodities unavailable during US market hours:** Likely caused
   by UTC+8 timezone setting shifting the market-hours check by ~12 h.
