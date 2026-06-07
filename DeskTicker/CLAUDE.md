@@ -32,7 +32,7 @@ a candlestick chart on a 3.5" 480×320 IPS touchscreen. No cloud backend, no API
 | `api_client.h / .cpp` | Yahoo Finance v8 chart API fetch; 4H aggregation; host fallback |
 | `chart_screen.h / .cpp` | LVGL chart screen: header, candle canvas, y-axis canvas, footer |
 | `wifi_manager.h / .cpp` | AP captive-portal setup UI (LVGL screen + HTTP web form); asset picker grouped into Crypto / Stocks & ETFs / Commodities / Forex sections |
-| `animations.h / .cpp` | After-hours fullscreen animations: tidepool, coral reef, starfield, countdown |
+| `animations.h / .cpp` | After-hours fullscreen animations: tidepool, coral reef, starfield (with clock), countdown, pixel beach, grassland |
 | `settings_screen.h / .cpp` | On-device settings menu: assets, TF, TZ, candle colour, anim, cycling, brightness, diagnostics |
 | `tz_options.h / .cpp` | Shared 34-entry timezone table consumed by both `wifi_manager` and `settings_screen` |
 
@@ -288,11 +288,28 @@ GPIO 0 (labeled **BOOT** on the board, NOT RST). Held LOW for ≥ 3 seconds in `
 
 ## After-Hours Animations
 
-Four scenes: **Tidepool** (rocky shore, dusk sky, pixel crab walk), **Coral Reef** (underwater
-parallax, tropical fish, pixel crab), **Starfield** (slow star drift), **Countdown** (digital
-clock to the asset's next session open via `secs_to_market_open(idx)` — NYSE 09:30 ET for
-stocks, Sun 17:00 ET for forex, Sun/18:00 ET for futures; crab walk, digit color shifts
-Pearl→Amber→Green in final 30/5 min).
+Six scenes: **Tidepool** (dusk shore: sunset sky + setting sun & soft reflection, headlands,
+tide-pools, beach detritus, twinkling stars, tide foam, drifting gulls, pixel crab + bubbles),
+**Coral Reef** (underwater: caustic god-rays, sandy rippled seabed, varied coral/anemones/
+urchin/starfish, finned fish at 3 depths, a drifting jellyfish, bubbles, pixel crab),
+**Starfield** (slow star drift + shooting stars, with a **centered real-time clock + date**
+overlay), **Countdown** (digital clock to the asset's next session open via
+`secs_to_market_open(idx)` — NYSE 09:30 ET for stocks, Sun 17:00 ET for forex, Sun/18:00 ET
+for futures; crab walk, digit color shifts Pearl→Amber→Green in final 30/5 min), **Pixel
+Beach** (night beach: boardwalk lamp post with a warm light cone reaching the sand, a wooden
+bench, twinkling stars, crescent moon, water glints, crab + footprints, occasional shooting
+star), **Grassland** (dawn meadow: rolling sine hills, warm rising sun, lone tree, drifting
+clouds, swaying grass tufts with wildflowers, butterflies, distant birds, pixel crab; `grass_*`).
+
+The internal `ANIM_*` constant names do NOT match the user-facing labels: `ANIM_AQUARIUM`=
+Tidepool (`aqua_*`), `ANIM_BEACH`=Coral Reef (`reef_*`), `ANIM_STARFIELD`=Starfield (`star_*`),
+`ANIM_COUNTDOWN`=Countdown, `ANIM_PIXELBEACH`=Pixel Beach (`pixbeach_*`), `ANIM_GRASSLAND 5`=
+Grassland (`grass_*`). The former slot-5/6 Market Pit / Night City / Synthwave / Aurora
+experiments were removed; Grassland reuses slot 5. The labels in
+`settings_screen.cpp`/`wifi_manager.cpp` are the source of truth. Every
+canvas scene bakes its static art once into `anim_bg` (zero per-frame cost) and per-frame
+erases moving sprites via `bg_restore()` then redraws them, so nothing ghosts. Starfield is the
+exception (full-canvas repaint each frame; its clock is a pair of LVGL labels on `anim_scr`).
 
 All scenes share `anim_scr` + `anim_canvas` (PSRAM) driven by `lv_timer_create()` at 120 ms.
 Countdown (`ANIM_COUNTDOWN`) additionally uses `cd_crab_canvas` (480×50 PSRAM strip) + a
@@ -360,6 +377,21 @@ Remaining backstops (still in place):
 
 LVGL upgrade would NOT have fixed this (bug is in precompiled SPI driver, below LVGL).
 Core stays **3.0.7**; `full_refresh` stays 1. See `BISECT_LOG.md` 2026-05-31 entries.
+
+**After-hours animations + `phase=7` (2026-06-07):** the `lvgl_flush_suspended` fix covers the
+*fetch* race, but the animations also hit the same QSPI hang on their own. With `full_refresh=1`
+locked, every animation frame is a full-screen QSPI flush; at the old 120 ms tick that is ~8
+full-screen flushes/sec — ~8× the chart's load — so the rare `phase=7` hang reboots ~hourly.
+Mitigation: all per-frame animation timers in `anim_start()` are **160 ms** (~6 fps), not 120 ms,
+to cut sustained QSPI flush pressure. Do not lower them back toward 120 ms without re-soaking.
+
+**RTC resume markers MUST be `RTC_NOINIT_ATTR`, not `RTC_DATA_ATTR`:** `s_reboot_mark`
+(`animations.cpp`) and `rtc_resume_asset_idx/tf/valid` (`DeskTicker.ino`) must survive
+`esp_restart()`. `RTC_DATA_ATTR` has an initializer the bootloader **reloads on every software
+reset**, which silently wiped the watchdog marker so the resume-last-view path never ran (the
+device rebooted to asset 0 = BTC instead of the selected closed-market ticker). `RTC_NOINIT_ATTR`
+survives a software reset; the `WDT_MAGIC` guard rejects cold-power-on garbage. See `BISECT_LOG.md`
+2026-06-07 entry.
 
 ---
 

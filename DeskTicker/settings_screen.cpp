@@ -294,7 +294,7 @@ static void update_main_theme_label() {
 static void update_main_anim_label() {
     if (!main_val_anim) return;
     const char* names[] = {"Tidepool", "Coral Reef", "Starfield", "Countdown",
-                           "Pixel Beach", "Market Pit"};
+                           "Pixel Beach", "Grassland"};
     int a = ss_work.after_anim;
     if (a < 0 || a > 5) a = 0;
     lv_label_set_text(main_val_anim, names[a]);
@@ -855,13 +855,13 @@ static void build_theme_page() {
     make_spacer(page_theme, 8);
 }
 
-// Animation page: lv_roller with 4 options.
+// Animation page: lv_roller with the after-hours scene options.
 static void build_anim_page() {
     page_anim = make_page(true);
 
     anim_roller = lv_roller_create(page_anim);
     lv_roller_set_options(anim_roller,
-        "Tidepool\nCoral Reef\nStarfield\nCountdown\nPixel Beach\nMarket Pit",
+        "Tidepool\nCoral Reef\nStarfield\nCountdown\nPixel Beach\nGrassland",
         LV_ROLLER_MODE_NORMAL);
     lv_roller_set_visible_row_count(anim_roller, 6);
     lv_obj_set_size(anim_roller, LV_PCT(100), CONT_H - 20);

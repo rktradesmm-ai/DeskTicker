@@ -160,10 +160,12 @@ Crypto is always open and never shows an after-hours screen.
 
 | Animation | Description |
 |-----------|-------------|
-| Tidepool | Rocky shore with dusk sky, rising bubbles, and a pixel crab that walks back and forth. Claw colors match your bull/bear candle theme. |
-| Coral Reef | Underwater reef with parallax depth layers, tropical fish, rising bubbles, and a walking pixel crab. Claw colors match your bull/bear theme. |
-| Starfield | Slow starfield drift — minimal and calm. |
+| Tidepool | Dusk shore at sunset: a setting sun reflecting on the tide, distant headlands, rocky tide-pools, beach detritus (starfish, shells, driftwood), twinkling stars, a gentle tide-foam line, drifting gulls, and a pixel crab among rising bubbles. Claw colors match your bull/bear candle theme. |
+| Coral Reef | Underwater reef with shimmering caustic light shafts, a sandy rippled seabed, varied coral plus anemones, a sea urchin and a starfish, finned tropical fish swimming at three depths, a slow drifting jellyfish, rising bubbles, and a walking pixel crab. Claw colors match your bull/bear theme. |
+| Starfield | Slow starfield drift with occasional shooting stars, and a large centered real-time clock with the date. |
 | Countdown | Digital clock counting down to the next NYSE/NASDAQ open (9:30 AM ET). Crab walks along the bottom; digit color shifts from white to amber to green as open time approaches. |
+| Pixel Beach | Night beach with a boardwalk lamp post casting a warm cone of light onto the sand, a wooden bench in the lit sand, twinkling stars, a crescent moon, shimmering water glints, starfish and seashells, and a walking pixel crab that leaves footprints. An occasional shooting star streaks across the sky. Claw colors match your bull/bear theme. |
+| Grassland | Calm dawn meadow: layered rolling hills under a soft sunrise sky, a warm rising sun, a lone tree, drifting clouds, swaying grass with tiny wildflowers, fluttering butterflies, a couple of distant birds, and a walking pixel crab in the foreground. Claw colors match your bull/bear theme. |
 
 ---
 
@@ -177,7 +179,7 @@ Triple-tap the chart or after-hours screen to open the **Settings** menu without
 | Timeframes | Which intervals are active (15m / 1h / 4h / 1D); swipe cycles through them |
 | Timezone | UTC offset for your location |
 | Candle Colour | Classic, Color Shift, Neon Pulse, or Custom (swatches shown for each option) |
-| After-Hours Animation | Tidepool / Coral Reef / Starfield / Countdown |
+| After-Hours Animation | Tidepool / Coral Reef / Starfield / Countdown / Pixel Beach / Grassland |
 | Asset Cycling | Enable auto-cycle and set the interval (5–120 s); disable for manual swipe only |
 | Brightness | Display brightness 10–100% (adjusts live as you drag) |
 | About / Diagnostics | Free heap, PSRAM, WiFi SSID/RSSI/IP, NTP status, uptime |
@@ -207,7 +209,7 @@ DeskTicker/
 ├── wifi_manager.h / .cpp  # Captive-portal setup UI + web form handler
 ├── api_client.h / .cpp    # Yahoo Finance v8 chart API, 4H aggregation, host fallback
 ├── chart_screen.h / .cpp  # LVGL candlestick chart, header, y-axis, footer
-├── animations.h / .cpp    # After-hours animations (tidepool, reef, starfield, countdown)
+├── animations.h / .cpp    # After-hours animations (tidepool, reef, starfield, countdown, pixel beach, grassland)
 ├── settings_screen.h / .cpp  # On-device settings menu (triple-tap to open)
 ├── tz_options.h / .cpp    # Shared 34-entry timezone table (used by setup portal + settings menu)
 ├── CLAUDE.md              # Architecture notes for AI-assisted development

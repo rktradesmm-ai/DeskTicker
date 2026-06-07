@@ -471,3 +471,39 @@ requiring us to guess:
   and surfaced `lockTO=/phase=/chunk=` in the 60 s `[health]` log.
 - After the next freeze, read the `[WDT]` boot line: `phase=4` confirms the draw path;
   `phase=6` means mutex starvation; `phase=0` means a chart timer callback is blocking.
+
+---
+
+## After-hours animations hang far more often than the chart — `phase=7` — 2026-06-07
+
+**Test:** on-device soak of the **Tidepool** and **Pixel Beach** after-hours scenes on core
+3.0.7 (`Pixel-Beach.log`, `Tidepool.log`).
+
+**Result:** every reboot is `[WDT] render watchdog: no frame in 5s … phase=7`, `reset_reason=SW`,
+with heap/PSRAM flat (no leak). `phase=7` = render task stuck in the AXS15231B CASET command
+send (`tx_param`) inside `panel_axs15231b_draw_bitmap()` — the same QSPI bus hang as `phase=4`,
+just on the command rather than the pixel-DMA leg. Observed MTBF: Pixel Beach ~1–2 h, Tidepool
+~11 h.
+
+**Why animations and not the chart:** the multi-day chart soak passed because S_CHART flushes
+~1×/sec. The animations run their `lv_timer` at **120 ms**, and with `full_refresh=1` (locked)
+*every* invalidated frame is a full 480×320 QSPI flush → **~8 full-screen flushes/sec,
+continuously**. That is ~8× the chart's sustained QSPI DMA volume, so the otherwise-rare
+`phase=7` hang surfaces hourly. This matches "many full-screen redraws per second / DMA pressure
+is the suspected root cause" in the guidance above.
+
+**Mitigation (2026-06-07):** lowered all per-frame animation timers from 120 ms → **160 ms**
+(~6 fps) in `animations.cpp` `anim_start()` (aqua/reef/pixbeach/star + countdown crab). Cuts
+sustained flush volume ~25% → ~30% longer MTBF, motion still smooth. Cannot be eliminated in
+software (full_refresh=1 is locked, so dirty-rect invalidation does not reduce flush area); the
+watchdog reboot stays the recovery.
+
+**Resume bug found + fixed (the real win):** the resume-last-view path existed but never ran,
+so a reboot always came up on asset 0 (= BTC) instead of the selected closed-market ticker. The
+RTC markers (`s_reboot_mark` in `animations.cpp`, `rtc_resume_*` in `DeskTicker.ino`) were
+`RTC_DATA_ATTR`, which the bootloader **reloads from its initializer on every `esp_restart()`** —
+wiping the magic so `render_wdt_consume_last_reboot()` always returned false (note the missing
+`[WDT] previous boot ended…` / `resuming last view:` lines in both logs). Changed them to
+**`RTC_NOINIT_ATTR`** (survives a software reset, garbage only on cold power-on, which the
+`WDT_MAGIC` guard rejects). Now a watchdog reboot resumes the same ticker/animation in ~5 s and
+is effectively invisible.

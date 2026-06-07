@@ -17,7 +17,7 @@
 #define ANIM_STARFIELD  2
 #define ANIM_COUNTDOWN  3
 #define ANIM_PIXELBEACH 4
-#define ANIM_MARKETPIT  5
+#define ANIM_GRASSLAND  5
 
 typedef struct {
     char     wifi_ssid[64];

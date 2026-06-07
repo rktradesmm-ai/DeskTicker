@@ -99,11 +99,16 @@ static bool        chart_displaced  = false;
 static bool        ntp_synced       = false;
 
 // Persist last-viewed asset and TF across watchdog reboots so the device resumes
-// the same view instead of starting from asset 0 / NVS-saved TF. RTC RAM survives
-// esp_restart but is zeroed on power-on, so these are only valid when rtc_resume_valid=true.
-RTC_DATA_ATTR static int  rtc_resume_asset_idx = 0;
-RTC_DATA_ATTR static int  rtc_resume_tf         = 0;
-RTC_DATA_ATTR static bool rtc_resume_valid       = false;
+// the same view instead of starting from asset 0 (= BTC) / NVS-saved TF. MUST be
+// RTC_NOINIT_ATTR, not RTC_DATA_ATTR: the latter is reloaded from its initializer
+// by the bootloader on every esp_restart(), so it would be wiped and the resume
+// would never happen (the device would always fall back to asset 0). RTC_NOINIT_ATTR
+// survives a software reset and is only garbage on a cold power-on — these are only
+// read when render_wdt_consume_last_reboot() confirms a watchdog reboot (its magic
+// guard rejects power-on garbage), and asset_idx/tf are range-checked before use.
+RTC_NOINIT_ATTR static int  rtc_resume_asset_idx = 0;
+RTC_NOINIT_ATTR static int  rtc_resume_tf         = 0;
+RTC_NOINIT_ATTR static bool rtc_resume_valid       = false;
 
 // ── LVGL helper macros ────────────────────────────────────────────────────────
 #define LV_LOCK()   bsp_display_lock(2000)  // 2 s timeout — prevents permanent freeze if vendor TE flush stalls

@@ -32,9 +32,14 @@ static volatile uint8_t   s_last_state = 0xFF;  // last main-loop State, for cra
 
 // Survives a software reset (esp_restart) so the NEXT boot can report that the
 // previous boot ended in a render-watchdog reboot, and what the device was doing
-// when it hung. RTC RAM is preserved across esp_restart, zeroed on power-on.
+// when it hung. MUST be RTC_NOINIT_ATTR, not RTC_DATA_ATTR: RTC_DATA_ATTR has an
+// initializer that the bootloader reloads on every software reset, so it would be
+// wiped back to zero by esp_restart() (the magic check below would then always
+// fail and the resume-last-view logic would never run). RTC_NOINIT_ATTR is left
+// untouched across a software/hardware reset and is only garbage on a cold
+// power-on — which the WDT_MAGIC guard in render_wdt_consume_last_reboot() rejects.
 #define WDT_MAGIC 0xDEADBE01u
-RTC_DATA_ATTR static WdtReboot s_reboot_mark;
+RTC_NOINIT_ATTR static WdtReboot s_reboot_mark;
 
 static void wdt_fire(void*) {
     // No render frame in 5 s — the LVGL render task is deadlocked. Record what the
@@ -187,6 +192,13 @@ static void bg_restore(int x1, int y1, int x2, int y2) {
 typedef struct { int16_t x, y; uint8_t bri, kind, big; } Star;
 static Star stars[STAR_COUNT];
 
+// Centered real-time clock overlay (labels render on top of the star canvas).
+// Created in the ANIM_STARFIELD dispatch, updated once per second in
+// star_timer_cb, and freed with anim_scr in anim_stop.
+static lv_obj_t* sf_lbl_clock = nullptr;
+static lv_obj_t* sf_lbl_date  = nullptr;
+static int       sf_last_sec  = -1;
+
 // Shooting star: a bright streak with a fading tail that crosses the sky
 // every 20–90 s.
 static bool          shoot_active  = false;
@@ -256,9 +268,40 @@ static void star_draw() {
     rdsc.radius = 0;
 }
 
+// Updates the centered clock + date labels once per second (cheap; same time
+// source as the Countdown screen). Shows --:--:-- until NTP has synced.
+static void sf_update_clock() {
+    if (!sf_lbl_clock) return;
+    time_t now_t = time(nullptr);
+    struct tm lt;
+    localtime_r(&now_t, &lt);
+    if (lt.tm_sec == sf_last_sec) return;   // only repaint when the second changes
+    sf_last_sec = lt.tm_sec;
+
+    if (lt.tm_year > 100) {   // NTP synced: year > 2000
+        char clock_buf[12];
+        snprintf(clock_buf, sizeof(clock_buf), "%02d:%02d:%02d",
+                 lt.tm_hour, lt.tm_min, lt.tm_sec);
+        lv_label_set_text(sf_lbl_clock, clock_buf);
+        if (sf_lbl_date) {
+            static const char* const WDAY[7] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
+            static const char* const MON[12] = {"Jan","Feb","Mar","Apr","May","Jun",
+                                                 "Jul","Aug","Sep","Oct","Nov","Dec"};
+            char date_buf[20];
+            snprintf(date_buf, sizeof(date_buf), "%s, %s %d",
+                     WDAY[lt.tm_wday], MON[lt.tm_mon], lt.tm_mday);
+            lv_label_set_text(sf_lbl_date, date_buf);
+        }
+    } else {
+        lv_label_set_text(sf_lbl_clock, "--:--:--");
+        if (sf_lbl_date) lv_label_set_text(sf_lbl_date, "---");
+    }
+}
+
 static void star_timer_cb(lv_timer_t*) {
     if (!anim_canvas) return;
     wdt_feed();
+    sf_update_clock();
 
     // Twinkle ~15 random stars per frame.
     for (int i = 0; i < STAR_COUNT / 8; i++) {
@@ -309,8 +352,11 @@ static void star_timer_cb(lv_timer_t*) {
 // ══════════════════════════════════════════════════════════════════════════════
 // TIDEPOOL AT DUSK
 // ══════════════════════════════════════════════════════════════════════════════
-#define TP_HORIZON      100   // y where sky meets water
+#define TP_HORIZON      122   // y where the dusk sky meets the water
 #define TP_BUBBLE_COUNT   8   // rising bubbles in the water zone
+#define TP_SUN_X        150   // setting-sun center x (left of center)
+#define TP_SUN_Y        (TP_HORIZON - 3)  // sun sits just above the waterline
+#define TP_SUN_R         15   // sun disc radius
 
 // Crab mascot state: one crab walks the rocky shore, blinks, and holds its
 // claws in the user's bull/bear candle colors.
@@ -330,6 +376,16 @@ typedef struct { int16_t x; float y; } Bubble;
 
 static Crab   crab_state;
 static Bubble bubbles[TP_BUBBLE_COUNT];
+
+// ── Per-frame ambient layers: twinkle stars, sun glints, tide foam, gulls ────
+#define TP_TWINKLE_COUNT 10
+static struct { int16_t x, y; uint8_t bri, big; } tp_twk[TP_TWINKLE_COUNT];
+#define TP_GLINT_COUNT 14
+static struct { int16_t x, y; uint8_t phase; } tp_glint[TP_GLINT_COUNT];
+static uint8_t tp_glint_tick = 0;
+static uint8_t tp_foam_phase = 0;
+#define TP_GULL_COUNT 2
+static struct { float x; int16_t y; float vx; } tp_gull[TP_GULL_COUNT];
 
 // Rocky shoreline: y of land surface at column x.
 static inline int tp_floor_y(int x) {
@@ -354,64 +410,107 @@ static void aqua_blot(int cx, int cy, int rad, float pr, float pg, float pb) {
     }
 }
 
-// One-time: dusk sky + tidal water + rocky shore + baked stars + pebbles.
-// All baked into anim_bg with ordered dithering.
+// One-time: sunset dusk sky + setting sun + headlands + tidal water with a sun
+// reflection + rocky shore with tide-pools + beach detritus + stars. Baked into
+// anim_bg with ordered dithering.
 static void aqua_bg_render() {
     if (!anim_bg) return;
 
+    // ── SKY / WATER / SHORE gradient ─────────────────────────────────────────
     for (int y = 0; y < SCR_H; y++) {
         for (int x = 0; x < SCR_W; x++) {
             int   ft = tp_floor_y(x);
             float r, g, b;
             if (y < TP_HORIZON) {
-                // Sky: deep navy at top (#0E1117) → dark teal-navy at horizon (#1A2F4A)
-                float f = (float)y / TP_HORIZON;
-                r = 14.0f + f * 12.0f;
-                g = 17.0f + f * 30.0f;
-                b = 23.0f + f * 51.0f;
+                // Dusk sunset: deep indigo top → violet midband → warm orange horizon
+                float f    = (float)y / TP_HORIZON;        // 0 top .. 1 horizon
+                float warm = f * f;                        // warmth ramps toward horizon
+                r = 24.0f + warm * 196.0f;                 // 24 → 220
+                g = 22.0f + warm * 70.0f + f * 16.0f;      // → ~108
+                b = 58.0f - f * 18.0f + sinf(f * 3.14159f) * 34.0f;  // violet midband
             } else if (y < ft) {
-                // Water: tidal teal, darker toward shore
+                // Water: warm near horizon (sunset reflection), teal toward shore
                 float denom = (float)(ft - TP_HORIZON);
                 float f = (denom > 0.0f) ? (float)(y - TP_HORIZON) / denom : 1.0f;
-                r = 30.0f  - f * 20.0f;
-                g = 111.0f - f * 74.0f;
-                b = 140.0f - f * 87.0f;
+                r = 60.0f * (1.0f - f) + 12.0f + f * 6.0f;
+                g = 70.0f - f * 38.0f;
+                b = 96.0f - f * 60.0f;
             } else {
-                // Shore: warm sand (#C9A36B family) deepening from rocky top
+                // Shore: warm dusk sand, deepening downward
                 float denom = (float)(SCR_H - ft);
                 float f = (denom > 0.0f) ? (float)(y - ft) / denom : 1.0f;
-                r = 70.0f + f * 100.0f;
-                g = 55.0f + f *  80.0f;
-                b = 35.0f + f *  55.0f;
+                r = 78.0f + f * 78.0f;
+                g = 58.0f + f * 56.0f;
+                b = 44.0f + f * 40.0f;
             }
             put_dith(anim_bg, x, y, r, g, b);
         }
     }
 
-    // Horizon shimmer line at sky/water boundary
+    // ── DISTANT HEADLANDS (two silhouette humps sitting on the horizon) ──────
+    struct { int cx, w, h; } hill[2] = { { 60, 130, 26 }, { 410, 150, 20 } };
+    for (int hh = 0; hh < 2; hh++) {
+        int x0 = hill[hh].cx - hill[hh].w / 2;
+        for (int x = x0; x <= hill[hh].cx + hill[hh].w / 2; x++) {
+            if (x < 0 || x >= SCR_W) continue;
+            float t   = (float)(x - x0) / (float)hill[hh].w;        // 0..1
+            int   top = TP_HORIZON - (int)(hill[hh].h * sinf(t * 3.14159f));
+            for (int y = top; y < TP_HORIZON; y++)
+                put_dith(anim_bg, x, y, 46.0f, 32.0f, 54.0f);       // dark violet land
+        }
+    }
+
+    // ── SETTING SUN + glow halo (over the sky) ───────────────────────────────
+    aqua_blot(TP_SUN_X, TP_SUN_Y, TP_SUN_R + 16, 150.0f,  70.0f, 50.0f);  // outer glow
+    aqua_blot(TP_SUN_X, TP_SUN_Y, TP_SUN_R + 7,  210.0f, 110.0f, 60.0f);  // inner glow
+    aqua_blot(TP_SUN_X, TP_SUN_Y, TP_SUN_R,      255.0f, 196.0f, 120.0f); // disc
+
+    // ── SUN REFLECTION COLUMN on the water (baked dappled warm band) ─────────
+    {
+        int ft = tp_floor_y(TP_SUN_X);
+        for (int y = TP_HORIZON + 1; y < ft; y++) {
+            int   half = 14 + (y - TP_HORIZON) * 2 / 5;            // fans to ~30% of screen width near the foreground
+            float fade = 1.0f - (float)(y - TP_HORIZON) / (float)(ft - TP_HORIZON);
+            for (int dx = -half; dx <= half; dx++) {
+                int x = TP_SUN_X + dx;
+                if (x < 0 || x >= SCR_W) continue;
+                if (((y + dx) % 3) != 0) continue;                 // sparse → soft, subtle shimmer
+                put_dith(anim_bg, x, y,
+                         35.0f + 55.0f * fade, 34.0f + 28.0f * fade, 34.0f + 10.0f * fade);
+            }
+        }
+    }
+
+    // ── HORIZON SHIMMER line ─────────────────────────────────────────────────
     for (int x = 0; x < SCR_W; x++) {
         float sh = 0.5f + 0.5f * sinf(x * 0.08f);
-        put_dith(anim_bg, x, TP_HORIZON,
-                 40.0f * sh, 90.0f * sh, 115.0f * sh);
-        if (TP_HORIZON + 1 < SCR_H)
-            put_dith(anim_bg, x, TP_HORIZON + 1,
-                     25.0f * sh, 65.0f * sh, 90.0f * sh);
+        put_dith(anim_bg, x, TP_HORIZON, 120.0f * sh, 70.0f * sh, 60.0f * sh);
     }
 
-    // Bake 38 stars into sky zone
-    for (int i = 0; i < 38; i++) {
+    // ── WATER RIPPLE highlight lines (a few cool horizontal streaks) ─────────
+    for (int ry = TP_HORIZON + 12; ry < SCR_H - 70; ry += 14) {
+        for (int x = 0; x < SCR_W; x++) {
+            int ft = tp_floor_y(x);
+            if (ry >= ft) continue;
+            float sh = 0.5f + 0.5f * sinf(x * 0.05f + ry * 0.3f);
+            if (sh < 0.6f) continue;
+            put_dith(anim_bg, x, ry, 40.0f + 25.0f * sh, 60.0f + 20.0f * sh, 80.0f + 20.0f * sh);
+        }
+    }
+
+    // ── STARS in the upper (darker) sky band ─────────────────────────────────
+    for (int i = 0; i < 30; i++) {
         int sx = random(0, SCR_W);
-        int sy = random(2, TP_HORIZON - 6);
-        uint8_t bv = (uint8_t)random(55, 210);
+        int sy = random(2, TP_HORIZON - 40);
+        uint8_t bv = (uint8_t)random(55, 200);
         put_dith(anim_bg, sx, sy, (float)bv, (float)bv, (float)bv);
-        // Slightly larger bright stars get a dim halo pixel
-        if (bv > 130 && sx + 1 < SCR_W)
-            put_dith(anim_bg, sx + 1, sy, bv * 0.55f, bv * 0.55f, bv * 0.55f);
+        if (bv > 140 && sx + 1 < SCR_W)
+            put_dith(anim_bg, sx + 1, sy, bv * 0.5f, bv * 0.5f, bv * 0.5f);
     }
 
-    // Shore pebbles and boulders
+    // ── SHORE pebbles and boulders ───────────────────────────────────────────
     static const uint32_t TP_PEBBLE[5] = {
-        0x3A3028, 0x4A3C2C, 0x5A4C38, 0x2A2420, 0x6A5840
+        0x4A3A2C, 0x5A4A34, 0x6A5840, 0x342A20, 0x7A6848
     };
     for (int p = 0; p < 80; p++) {
         int px  = random(2, SCR_W - 2);
@@ -420,20 +519,63 @@ static void aqua_bg_render() {
         int rad = random(1, 4);
         uint32_t c = TP_PEBBLE[random(0, 5)];
         aqua_blot(px, py, rad,
-                  (float)((c >> 16) & 0xFF),
-                  (float)((c >>  8) & 0xFF),
-                  (float)( c        & 0xFF));
+                  (float)((c >> 16) & 0xFF), (float)((c >> 8) & 0xFF), (float)(c & 0xFF));
     }
-    for (int p = 0; p < 5; p++) {
-        int px  = 50 + random(0, SCR_W - 100);
+    for (int p = 0; p < 6; p++) {
+        int px  = 40 + random(0, SCR_W - 80);
         int ft  = tp_floor_y(px);
-        int rad = random(8, 14);
+        int rad = random(8, 15);
         int py  = ft + rad - 2;
         uint32_t c = TP_PEBBLE[random(0, 5)];
         aqua_blot(px, py, rad,
-                  (float)((c >> 16) & 0xFF),
-                  (float)((c >>  8) & 0xFF),
-                  (float)( c        & 0xFF));
+                  (float)((c >> 16) & 0xFF), (float)((c >> 8) & 0xFF), (float)(c & 0xFF));
+        aqua_blot(px - rad / 3, py - rad / 3, rad / 3 + 1, 150.0f, 110.0f, 80.0f); // sunlit edge
+    }
+
+    // ── TIDE-POOL puddles in the rock (dark reflective patches + warm glint) ─
+    static const int TP_POOL[2] = { 250, 360 };
+    for (int p = 0; p < 2; p++) {
+        int px = TP_POOL[p];
+        int py = tp_floor_y(px) + 18;
+        for (int yy = py - 4; yy <= py + 4; yy++)
+            for (int xx = px - 12; xx <= px + 12; xx++) {
+                if (xx < 0 || xx >= SCR_W || yy < 0 || yy >= SCR_H) continue;
+                float ex = (float)(xx - px) / 12.0f, ey = (float)(yy - py) / 4.0f;
+                if (ex * ex + ey * ey > 1.0f) continue;
+                put_dith(anim_bg, xx, yy, 30.0f, 44.0f, 58.0f);    // reflective water
+            }
+        put_dith(anim_bg, px - 4, py - 1, 150.0f, 90.0f, 70.0f);   // warm sky glint
+        put_dith(anim_bg, px - 3, py - 1, 120.0f, 80.0f, 64.0f);
+    }
+
+    // ── DETRITUS: starfish, shells, driftwood, seaweed ───────────────────────
+    {
+        int fx = 90, fy = tp_floor_y(fx) + 26;                     // starfish
+        aqua_blot(fx, fy, 3, 196.0f, 110.0f, 70.0f);
+        put_dith(anim_bg, fx,     fy - 5, 217, 140, 90);
+        put_dith(anim_bg, fx - 5, fy - 1, 217, 140, 90);
+        put_dith(anim_bg, fx + 5, fy - 1, 217, 140, 90);
+        put_dith(anim_bg, fx - 3, fy + 5, 217, 140, 90);
+        put_dith(anim_bg, fx + 3, fy + 5, 217, 140, 90);
+
+        aqua_blot(300, tp_floor_y(300) + 30, 2, 210.0f, 196.0f, 172.0f);  // shells
+        aqua_blot(430, tp_floor_y(430) + 22, 2, 224.0f, 206.0f, 182.0f);
+
+        int wx = 200, wy = tp_floor_y(wx) + 40;                    // driftwood sliver
+        for (int x = wx - 14; x <= wx + 14; x++)
+            if (x >= 0 && x < SCR_W) {
+                put_dith(anim_bg, x, wy,     92.0f, 70.0f, 50.0f);
+                put_dith(anim_bg, x, wy + 1, 70.0f, 52.0f, 36.0f);
+            }
+
+        int kx = 360, kbase = tp_floor_y(kx) + 8;                  // seaweed clump
+        for (int blade = -2; blade <= 2; blade++)
+            for (int h = 0; h <= 8 - (blade < 0 ? -blade : blade) * 2; h++) {
+                int xx = kx + blade * 2 + (int)(h * 0.3f * (blade < 0 ? -1 : 1));
+                int yy = kbase - h;
+                if (xx >= 0 && xx < SCR_W && yy >= 0 && yy < SCR_H)
+                    put_dith(anim_bg, xx, yy, 46.0f, 78.0f, 46.0f);
+            }
     }
 }
 
@@ -547,6 +689,28 @@ static void aqua_init() {
         int ft = tp_floor_y(bubbles[i].x);
         bubbles[i].y = (float)random(TP_HORIZON, ft - 5);
     }
+
+    // Twinkling stars in the upper (darker) sky band
+    for (int i = 0; i < TP_TWINKLE_COUNT; i++) {
+        tp_twk[i].x   = (int16_t)random(4, SCR_W - 4);
+        tp_twk[i].y   = (int16_t)random(3, TP_HORIZON - 42);
+        tp_twk[i].bri = (uint8_t)random(60, 190);
+        tp_twk[i].big = (random(0, 5) == 0) ? 1 : 0;
+    }
+    // Sun-reflection shimmer glints clustered on the water under the sun
+    tp_glint_tick = 0;
+    for (int i = 0; i < TP_GLINT_COUNT; i++) {
+        tp_glint[i].x     = (int16_t)(TP_SUN_X + random(-70, 71));
+        tp_glint[i].y     = (int16_t)random(TP_HORIZON + 6, TP_HORIZON + 128);
+        tp_glint[i].phase = (uint8_t)random(0, 255);
+    }
+    tp_foam_phase = 0;
+    // Gulls drift slowly across the sky
+    for (int i = 0; i < TP_GULL_COUNT; i++) {
+        tp_gull[i].x  = (float)random(0, SCR_W);
+        tp_gull[i].y  = (int16_t)random(24, TP_HORIZON - 50);
+        tp_gull[i].vx = (random(0, 2) ? 1 : -1) * (0.25f + random(0, 20) * 0.01f);
+    }
 }
 
 static void aqua_timer_cb(lv_timer_t*) {
@@ -566,6 +730,70 @@ static void aqua_timer_cb(lv_timer_t*) {
         }
         lv_obj_invalidate(anim_canvas);
         return;
+    }
+
+    // ── AMBIENT LAYERS (drawn first so the crab/bubbles render on top) ────────
+    // Twinkling stars in the upper sky
+    {
+        lv_draw_rect_dsc_t sd; lv_draw_rect_dsc_init(&sd);
+        sd.radius = 0; sd.border_width = 0;
+        for (int i = 0; i < TP_TWINKLE_COUNT; i++) {
+            int sx = tp_twk[i].x, sy = tp_twk[i].y, sz = tp_twk[i].big ? 2 : 1;
+            bg_restore(sx - 1, sy - 1, sx + sz, sy + sz);
+            int nb = (int)tp_twk[i].bri + (int)random(-40, 41);
+            if (nb < 40) nb = 40; if (nb > 255) nb = 255;
+            tp_twk[i].bri = (uint8_t)nb;
+            sd.bg_color = lv_color_make((uint8_t)nb, (uint8_t)nb, (uint8_t)(nb * 0.95f));
+            sd.bg_opa   = LV_OPA_COVER;
+            lv_canvas_draw_rect(anim_canvas, sx, sy, sz, sz, &sd);
+        }
+    }
+    // Sun-reflection shimmer glints on the water
+    tp_glint_tick++;
+    {
+        lv_draw_rect_dsc_t gd; lv_draw_rect_dsc_init(&gd);
+        gd.radius = 0; gd.border_width = 0;
+        for (int i = 0; i < TP_GLINT_COUNT; i++) {
+            int gx = tp_glint[i].x, gy = tp_glint[i].y;
+            bg_restore(gx - 1, gy, gx + 2, gy + 1);
+            float sh = 0.5f + 0.5f * sinf((tp_glint_tick + tp_glint[i].phase) * 0.11f);
+            uint8_t v = (uint8_t)(40.0f + 45.0f * sh);
+            gd.bg_color = lv_color_make(v, (uint8_t)(v * 0.7f), (uint8_t)(v * 0.4f)); // warm
+            gd.bg_opa   = (lv_opa_t)(22 + (int)(40.0f * sh));
+            lv_canvas_draw_rect(anim_canvas, gx, gy, 2, 1, &gd);
+        }
+    }
+    // Tide-foam line tracking the rock/water edge (warm-tinted, slides left)
+    tp_foam_phase++;
+    bg_restore(0, 252, SCR_W - 1, 276);
+    {
+        lv_draw_rect_dsc_t fd; lv_draw_rect_dsc_init(&fd);
+        fd.radius = 0; fd.border_width = 0;
+        fd.bg_color = lv_color_hex(0xE8C8A0); fd.bg_opa = LV_OPA_50;
+        for (int x = 0; x < SCR_W; x++) {
+            int ft = tp_floor_y(x);
+            int wy = ft - 1 + (int)(2.0f * sinf((x + tp_foam_phase) * 0.09f));
+            if (wy >= 0 && wy < SCR_H)
+                lv_canvas_draw_rect(anim_canvas, x, wy, 1, 1, &fd);
+        }
+    }
+    // Gulls drifting across the sky (little "v" silhouettes)
+    {
+        lv_draw_rect_dsc_t wd; lv_draw_rect_dsc_init(&wd);
+        wd.radius = 0; wd.border_width = 0; wd.bg_color = lv_color_hex(0xD8D0E0);
+        for (int i = 0; i < TP_GULL_COUNT; i++) {
+            int ogx = (int)tp_gull[i].x, gy = tp_gull[i].y;
+            bg_restore(ogx - 6, gy - 1, ogx + 6, gy + 3);
+            tp_gull[i].x += tp_gull[i].vx;
+            if (tp_gull[i].x < -8)        tp_gull[i].x = SCR_W + 8;
+            if (tp_gull[i].x > SCR_W + 8) tp_gull[i].x = -8;
+            int gx = (int)tp_gull[i].x;
+            for (int k = 0; k < 3; k++) {
+                int yy = gy + k;
+                if (gx - 1 - k >= 0)    lv_canvas_draw_rect(anim_canvas, gx - 1 - k, yy, 2, 1, &wd);
+                if (gx + k < SCR_W)     lv_canvas_draw_rect(anim_canvas, gx + k,     yy, 2, 1, &wd);
+            }
+        }
     }
 
     // ── CRAB ─────────────────────────────────────────────────────────────────
@@ -676,13 +904,19 @@ static void aqua_timer_cb(lv_timer_t*) {
 // ══════════════════════════════════════════════════════════════════════════════
 // CORAL REEF
 // ══════════════════════════════════════════════════════════════════════════════
-#define REEF_FISH_COUNT   3
-#define REEF_BUBBLE_COUNT 8
+#define REEF_FISH_COUNT   6
+#define REEF_BUBBLE_COUNT 10
 
 typedef struct { float x, y, vx, scale; bool right; int col_idx; } ReefFish;
 
 static ReefFish reef_fish[REEF_FISH_COUNT];
 static Bubble   reef_bubbles[REEF_BUBBLE_COUNT];
+
+// One slow drifting jellyfish + animated caustic light shafts (per-frame layers).
+static struct { float x, y, vx; uint8_t phase; } reef_jelly;
+#define REEF_RAY_COUNT 5
+static struct { int16_t x; uint8_t phase; } reef_ray[REEF_RAY_COUNT];
+static uint8_t reef_ray_tick = 0;
 
 static const uint32_t REEF_FISH_COL[5] = {
     0xFFD700, 0xFF7420, 0x4FC3D8, 0xB0E860, 0xFF8CB0
@@ -698,68 +932,89 @@ static inline int reef_floor_y(int x) {
 // Simple reef fish: rounded body + forked tail + eye.
 // Draws onto anim_canvas (only used from reef_timer_cb).
 static void draw_reef_fish(int x, int y, lv_color_t col, bool right, float scale) {
-    int bw = (int)(16 * scale); if (bw < 5) bw = 5;
-    int bh = (int)(8  * scale); if (bh < 3) bh = 3;
+    int bw = (int)(18 * scale); if (bw < 6) bw = 6;
+    int bh = (int)(9  * scale); if (bh < 3) bh = 3;
     int tl = (int)(8  * scale); if (tl < 2) tl = 2;
 
     lv_draw_rect_dsc_t rd;
     lv_draw_rect_dsc_init(&rd);
     rd.border_width = 0;
 
-    lv_color_t dark = lv_color_mix(lv_color_black(), col, 65);
-    rd.bg_color     = dark;
-    int prong_h     = (bh - 1) / 3; if (prong_h < 1) prong_h = 1;
+    lv_color_t dark = lv_color_mix(lv_color_black(), col, 60);
+    lv_color_t lite = lv_color_mix(lv_color_white(), col, 35);
+
+    // Forked tail (behind the body), with a filled notch
+    rd.bg_color = dark;
+    int prong_h = (bh - 1) / 3; if (prong_h < 1) prong_h = 1;
     if (right) {
-        lv_canvas_draw_rect(anim_canvas, x - tl, y,                tl, prong_h, &rd);
-        lv_canvas_draw_rect(anim_canvas, x - tl, y + bh - prong_h, tl, prong_h, &rd);
+        lv_canvas_draw_rect(anim_canvas, x - tl,     y,                tl,     prong_h, &rd);
+        lv_canvas_draw_rect(anim_canvas, x - tl,     y + bh - prong_h, tl,     prong_h, &rd);
+        lv_canvas_draw_rect(anim_canvas, x - tl / 2, y + bh / 2 - 1,   tl / 2 + 1, 2,   &rd);
     } else {
-        lv_canvas_draw_rect(anim_canvas, x + bw, y,                tl, prong_h, &rd);
-        lv_canvas_draw_rect(anim_canvas, x + bw, y + bh - prong_h, tl, prong_h, &rd);
+        lv_canvas_draw_rect(anim_canvas, x + bw,     y,                tl,     prong_h, &rd);
+        lv_canvas_draw_rect(anim_canvas, x + bw,     y + bh - prong_h, tl,     prong_h, &rd);
+        lv_canvas_draw_rect(anim_canvas, x + bw,     y + bh / 2 - 1,   tl / 2 + 1, 2,   &rd);
     }
+
+    // Dorsal fin on top
+    rd.bg_color = lite;
+    lv_canvas_draw_rect(anim_canvas, x + bw / 4, y - 2, bw / 2, 2, &rd);
+
+    // Rounded body
     rd.radius   = LV_RADIUS_CIRCLE;
     rd.bg_color = col;
     lv_canvas_draw_rect(anim_canvas, x, y, bw, bh, &rd);
     rd.radius   = 0;
-    int ex      = right ? (x + bw - (int)(4 * scale)) : (x + (int)(2 * scale));
-    rd.bg_color = lv_color_hex(0x080808);
+
+    // Vertical stripe across the body
+    rd.bg_color = dark;
+    rd.bg_opa   = LV_OPA_50;
+    int stripx = right ? (x + bw / 2) : (x + bw / 3);
+    lv_canvas_draw_rect(anim_canvas, stripx, y, 2, bh, &rd);
+    rd.bg_opa   = LV_OPA_COVER;
+
+    // Eye (white + dark pupil)
+    int ex = right ? (x + bw - (int)(4 * scale)) : (x + (int)(2 * scale));
+    rd.bg_color = lv_color_hex(0xF4F6FA);
     lv_canvas_draw_rect(anim_canvas, ex, y + bh / 2 - 1, 2, 2, &rd);
+    rd.bg_color = lv_color_hex(0x080808);
+    lv_canvas_draw_rect(anim_canvas, ex + (right ? 1 : 0), y + bh / 2 - 1, 1, 2, &rd);
 }
 
 static void reef_fish_bbox(int fx, int fy, float sc, bool right,
                            int* x1, int* y1, int* x2, int* y2) {
-    int bw = (int)(16 * sc); if (bw < 5) bw = 5;
-    int bh = (int)(8  * sc); if (bh < 3) bh = 3;
+    int bw = (int)(18 * sc); if (bw < 6) bw = 6;
+    int bh = (int)(9  * sc); if (bh < 3) bh = 3;
     int tl = (int)(8  * sc); if (tl < 2) tl = 2;
     *x1 = (right ? fx - tl : fx) - 2;
     *x2 = (right ? fx + bw : fx + bw + tl) + 2;
-    *y1 = fy - 2;
+    *y1 = fy - 4;                 // include the dorsal fin
     *y2 = fy + bh + 2;
 }
 
-// One-time: underwater water gradient + reef floor + coral formations
-// + kelp strands + floor pebbles. All baked into anim_bg.
+// One-time: underwater gradient + caustics + sandy rippled seabed + varied coral,
+// anemones, urchin, starfish + kelp. All baked into anim_bg.
 static void reef_bg_render() {
     if (!anim_bg) return;
 
-    // Water column: bright teal (#1B6FA8) at surface → deep navy (#071520) at floor
+    // Water column: bright teal at surface → deep navy near the floor
     for (int y = 0; y < SCR_H; y++) {
         float f = (float)y / (SCR_H - 1);
         for (int x = 0; x < SCR_W; x++) {
             int   ft = reef_floor_y(x);
             float r, g, b;
             if (y >= ft) {
-                // Rocky reef floor
+                // Sandy seabed (warm tan, darkening with depth)
                 float fd = (float)(y - ft) / (float)(SCR_H - ft);
-                r = 26.0f + fd * 14.0f;
-                g = 32.0f + fd * 10.0f;
-                b = 42.0f + fd *  8.0f;
+                r = 86.0f - fd * 30.0f;
+                g = 74.0f - fd * 28.0f;
+                b = 52.0f - fd * 22.0f;
             } else {
                 r = 27.0f  - f * 20.0f;
                 g = 111.0f - f * 90.0f;
                 b = 168.0f - f * 140.0f;
-                // Caustic shimmer near surface
-                if (y < 40) {
-                    float caus = (40.0f - y) / 40.0f * 10.0f
+                if (y < 44) {   // caustic shimmer near the surface
+                    float caus = (44.0f - y) / 44.0f * 12.0f
                                  * (0.5f + 0.5f * sinf(x * 0.12f + y * 0.3f));
                     g += caus; if (g > 255.0f) g = 255.0f;
                     b += caus; if (b > 255.0f) b = 255.0f;
@@ -769,46 +1024,102 @@ static void reef_bg_render() {
         }
     }
 
-    // Coral formations: 5 clusters using brand-kit accent coral (#FF7A7A family)
-    struct { int cx; int sz; uint32_t col; } coral[5] = {
-        {  60, 22, 0xFF7A7A },
-        { 155, 18, 0xFF9A6A },
-        { 250, 24, 0xFF6A8A },
-        { 355, 20, 0xFF8A70 },
-        { 440, 16, 0xFF7A8A },
-    };
-    for (int c = 0; c < 5; c++) {
-        int ft      = reef_floor_y(coral[c].cx);
-        int branches = 2 + coral[c].sz / 8;
-        for (int bi = 0; bi < branches; bi++) {
-            int bx   = coral[c].cx + random(-6, 7);
-            int brad = coral[c].sz / 2 - bi * 2;
-            if (brad < 4) brad = 4;
-            aqua_blot(bx, ft - brad + 3, brad,
-                      (float)((coral[c].col >> 16) & 0xFF),
-                      (float)((coral[c].col >>  8) & 0xFF),
-                      (float)( coral[c].col        & 0xFF));
+    // Seabed ripple lines (darker dapples following the floor curve)
+    for (int x = 0; x < SCR_W; x++) {
+        int ft = reef_floor_y(x);
+        for (int ry = ft + 8; ry < SCR_H; ry += 9) {
+            float sh = 0.5f + 0.5f * sinf(x * 0.06f + ry * 0.5f);
+            if (sh < 0.5f) continue;
+            put_dith(anim_bg, x, ry, 60.0f, 50.0f, 34.0f);
         }
     }
 
-    // Floor pebbles
-    static const uint32_t REEF_PEB[4] = { 0x1E2830, 0x283038, 0x1A2A38, 0x243040 };
-    for (int p = 0; p < 70; p++) {
-        int px  = random(2, SCR_W - 2);
-        int ft  = reef_floor_y(px);
-        int py  = ft + random(2, SCR_H - ft - 1);
-        int rad = random(1, 4);
-        uint32_t c = REEF_PEB[random(0, 4)];
-        aqua_blot(px, py, rad,
-                  (float)((c >> 16) & 0xFF),
-                  (float)((c >>  8) & 0xFF),
-                  (float)( c        & 0xFF));
+    // Varied coral: kind 0 = brain (round ridged), 1 = branching, 2 = tube sponges
+    struct { int cx; int sz; uint32_t col; uint8_t kind; } coral[9] = {
+        {  40, 22, 0xFF7A7A, 0 }, {  95, 16, 0xFFB060, 1 }, { 150, 20, 0xFF6A8A, 2 },
+        { 210, 24, 0xE76AC8, 0 }, { 265, 16, 0xFF9A6A, 1 }, { 320, 22, 0x9A7AFF, 2 },
+        { 375, 18, 0x6AC8FF, 0 }, { 430, 22, 0xFF7A8A, 1 }, { 465, 14, 0xFFC050, 2 },
+    };
+    for (int c = 0; c < 9; c++) {
+        int   ft = reef_floor_y(coral[c].cx);
+        float cr = (coral[c].col >> 16) & 0xFF;
+        float cg = (coral[c].col >>  8) & 0xFF;
+        float cb =  coral[c].col        & 0xFF;
+        if (coral[c].kind == 0) {                 // brain coral: stacked blobs
+            int n = 2 + coral[c].sz / 8;
+            for (int bi = 0; bi < n; bi++) {
+                int bx   = coral[c].cx + random(-6, 7);
+                int brad = coral[c].sz / 2 - bi * 2; if (brad < 4) brad = 4;
+                aqua_blot(bx, ft - brad + 3, brad, cr, cg, cb);
+            }
+        } else if (coral[c].kind == 1) {          // branching coral: thin fingers
+            for (int b = -2; b <= 2; b++) {
+                int h = coral[c].sz - (b < 0 ? -b : b) * 3;
+                for (int k = 0; k <= h; k++) {
+                    int xx = coral[c].cx + b * 3 + (int)(k * 0.25f * b);
+                    int yy = ft - k;
+                    if (xx >= 0 && xx < SCR_W && yy >= 0 && yy < SCR_H)
+                        put_dith(anim_bg, xx, yy, cr, cg, cb);
+                }
+            }
+        } else {                                  // tube sponges: vertical cylinders
+            for (int t = 0; t < 3; t++) {
+                int tx = coral[c].cx + (t - 1) * 4;
+                int th = coral[c].sz - t * 3; if (th < 6) th = 6;
+                for (int yy = ft; yy > ft - th; yy--)
+                    for (int xx = tx - 1; xx <= tx + 1; xx++)
+                        if (xx >= 0 && xx < SCR_W && yy >= 0 && yy < SCR_H)
+                            put_dith(anim_bg, xx, yy, cr, cg, cb);
+                if (tx >= 0 && tx < SCR_W)        // dark mouth at the top
+                    put_dith(anim_bg, tx, ft - th, cr * 0.3f, cg * 0.3f, cb * 0.3f);
+            }
+        }
     }
 
-    // Kelp strands (4 tall strands baked in with natural curve)
+    // Anemones: base blob + radiating tentacle pixels
+    static const int ANEM[2] = { 120, 350 };
+    for (int a = 0; a < 2; a++) {
+        int ax = ANEM[a]; int ay = reef_floor_y(ax) - 2;
+        aqua_blot(ax, ay, 4, 220.0f, 120.0f, 150.0f);
+        for (int t = -4; t <= 4; t++) {
+            int len = 6 - (t < 0 ? -t : t);
+            for (int k = 0; k <= len; k++) {
+                int xx = ax + t + (int)(k * 0.2f * t);
+                int yy = ay - 2 - k;
+                if (xx >= 0 && xx < SCR_W && yy >= 0 && yy < SCR_H)
+                    put_dith(anim_bg, xx, yy, 230.0f, 150.0f, 180.0f);
+            }
+        }
+    }
+
+    // Sea urchin: dark spiky blob
+    {
+        int ux = 290, uy = reef_floor_y(ux) + 4;
+        aqua_blot(ux, uy, 4, 40.0f, 24.0f, 50.0f);
+        for (int s = 0; s < 8; s++) {
+            float ang = s * 0.785f;
+            int xx = ux + (int)(7 * cosf(ang));
+            int yy = uy + (int)(7 * sinf(ang));
+            if (xx >= 0 && xx < SCR_W && yy >= 0 && yy < SCR_H)
+                put_dith(anim_bg, xx, yy, 30.0f, 18.0f, 40.0f);
+        }
+    }
+
+    // Starfish on the sand
+    {
+        int fx = 200, fy = reef_floor_y(fx) + 12;
+        aqua_blot(fx, fy, 3, 230.0f, 120.0f, 70.0f);
+        put_dith(anim_bg, fx,     fy - 5, 240, 150, 90);
+        put_dith(anim_bg, fx - 5, fy - 1, 240, 150, 90);
+        put_dith(anim_bg, fx + 5, fy - 1, 240, 150, 90);
+        put_dith(anim_bg, fx - 3, fy + 5, 240, 150, 90);
+        put_dith(anim_bg, fx + 3, fy + 5, 240, 150, 90);
+    }
+
+    // Kelp strands (6 tall strands with natural curve)
     static const uint32_t KELP[2] = { 0x2E8B57, 0x1F6B3F };
-    for (int k = 0; k < 4; k++) {
-        int   kx   = 90 + k * 100 + random(-12, 13);
+    for (int k = 0; k < 6; k++) {
+        int   kx   = 50 + k * 75 + random(-12, 13);
         int   ft   = reef_floor_y(kx) + 2;
         int   hgt  = random(70, 130);
         float amp  = 5.0f + k * 1.5f;
@@ -834,12 +1145,13 @@ static void reef_bg_render() {
 }
 
 static void reef_init() {
-    // Fish at 3 depths: back=small+slow, front=larger+faster (depth illusion)
+    // Fish across 3 depth bands (2 each): back = small+slow, front = large+fast
     for (int i = 0; i < REEF_FISH_COUNT; i++) {
-        float sc  = 0.55f + i * 0.15f;
-        float spd = 0.40f + i * 0.25f;
+        int   band = i % 3;
+        float sc   = 0.55f + band * 0.22f;
+        float spd  = 0.40f + band * 0.30f;
         reef_fish[i].scale   = sc;
-        reef_fish[i].y       = 30.0f + i * 65.0f;
+        reef_fish[i].y       = 26.0f + band * 56.0f + random(-8, 9);
         reef_fish[i].x       = random(20, SCR_W - 20);
         reef_fish[i].right   = (bool)random(0, 2);
         reef_fish[i].vx      = reef_fish[i].right ? spd : -spd;
@@ -849,6 +1161,18 @@ static void reef_init() {
         reef_bubbles[i].x = random(0, SCR_W);
         int ft = reef_floor_y(reef_bubbles[i].x);
         reef_bubbles[i].y = (float)random(10, ft - 10);
+    }
+    // Slow drifting jellyfish through the upper-mid water
+    reef_jelly.x     = (float)random(40, SCR_W - 40);
+    reef_jelly.y     = (float)random(40, 120);
+    reef_jelly.vx    = (random(0, 2) ? 1 : -1) * 0.25f;
+    reef_jelly.phase = 0;
+    // Caustic light shafts spread across the width
+    reef_ray_tick = 0;
+    for (int i = 0; i < REEF_RAY_COUNT; i++) {
+        reef_ray[i].x     = (int16_t)(30 + i * (SCR_W - 60) / (REEF_RAY_COUNT - 1)
+                                       + random(-12, 13));
+        reef_ray[i].phase = (uint8_t)random(0, 255);
     }
     // Crab walks the reef floor (reuses crab_state — never active with tidepool)
     crab_state.x            = SCR_W * 0.45f;
@@ -879,6 +1203,54 @@ static void reef_timer_cb(lv_timer_t*) {
         }
         lv_obj_invalidate(anim_canvas);
         return;
+    }
+
+    // ── CAUSTIC LIGHT SHAFTS (pulsing translucent beams, drawn behind sprites) ─
+    reef_ray_tick++;
+    {
+        lv_draw_rect_dsc_t rd; lv_draw_rect_dsc_init(&rd);
+        rd.radius = 0; rd.border_width = 0; rd.bg_color = lv_color_hex(0xBFF0FF);
+        for (int i = 0; i < REEF_RAY_COUNT; i++) {
+            int rx = reef_ray[i].x;
+            bg_restore(rx - 3, 0, rx + 12, 150);
+            float pulse = 0.4f + 0.6f * (0.5f + 0.5f *
+                          sinf((reef_ray_tick + reef_ray[i].phase) * 0.04f));
+            for (int seg = 0; seg < 6; seg++) {
+                int   yy   = seg * 25;
+                float fade = 1.0f - (float)yy / 150.0f;     // brightest at the surface
+                int   op   = (int)(40.0f * fade * pulse);
+                if (op < 3) continue;
+                rd.bg_opa = (lv_opa_t)op;
+                int xoff = (int)(yy * 0.06f);               // slight diagonal lean
+                lv_canvas_draw_rect(anim_canvas, rx + xoff - 2, yy, 5, 25, &rd);
+            }
+        }
+    }
+
+    // ── JELLYFISH (slow translucent drifter) ──────────────────────────────────
+    reef_jelly.phase++;
+    {
+        int ojx = (int)reef_jelly.x, ojy = (int)reef_jelly.y;
+        bg_restore(ojx - 10, ojy - 8, ojx + 10, ojy + 22);
+        reef_jelly.x += reef_jelly.vx;
+        if (reef_jelly.x < -12)        reef_jelly.x = SCR_W + 12;
+        if (reef_jelly.x > SCR_W + 12) reef_jelly.x = -12;
+        reef_jelly.y += 0.15f * sinf(reef_jelly.phase * 0.08f);   // gentle bob
+        int jx = (int)reef_jelly.x, jy = (int)reef_jelly.y;
+        lv_draw_rect_dsc_t jd; lv_draw_rect_dsc_init(&jd);
+        jd.radius = LV_RADIUS_CIRCLE; jd.border_width = 0;
+        jd.bg_color = lv_color_hex(0xC8A0FF); jd.bg_opa = LV_OPA_50;
+        lv_canvas_draw_rect(anim_canvas, jx - 8, jy - 6, 16, 12, &jd);   // bell
+        jd.bg_opa = LV_OPA_30;
+        lv_canvas_draw_rect(anim_canvas, jx - 6, jy - 8, 12, 6, &jd);    // dome cap
+        jd.radius = 0; jd.bg_opa = LV_OPA_40; jd.bg_color = lv_color_hex(0xD8C0FF);
+        for (int t = -3; t <= 3; t += 2)                                 // tentacles
+            for (int k = 0; k < 14; k++) {
+                int xx = jx + t + (int)(2.0f * sinf((k * 0.5f) + reef_jelly.phase * 0.15f + t));
+                int yy = jy + 5 + k;
+                if (xx >= 0 && xx < SCR_W && yy >= 0 && yy < SCR_H)
+                    lv_canvas_draw_rect(anim_canvas, xx, yy, 1, 1, &jd);
+            }
     }
 
     // ── CRAB ─────────────────────────────────────────────────────────────────
@@ -982,11 +1354,16 @@ static void reef_timer_cb(lv_timer_t*) {
 // ══════════════════════════════════════════════════════════════════════════════
 #define PB_HORIZON    210   // y where water meets sand
 #define PB_SAND_TOP   265   // y where dry sand starts
-#define PB_LH_X       420   // lighthouse pillar center x
-#define PB_LH_BASE    260   // y of lighthouse base (in the sand)
-#define PB_LH_TOP     190   // y of lighthouse top beacon
-#define PB_BEACON_MS  4000  // full blink cycle in ms
-#define PB_BEACON_ON  250   // ON phase duration in ms
+
+// Boardwalk lamp-post geometry (replaces the old lighthouse). The post is a
+// tall weathered-wood column near the right side; a glowing lantern head sits
+// just below the finial, and a long warm cone of light fans down to the sand.
+#define PB_LAMP_X      400   // post center x (pulled inboard so the cone fits)
+#define PB_LAMP_BASE   288   // y of the post foot (planted in the DRY sand, below the surf)
+#define PB_LAMP_TOP    151   // y of the finial at the top of the post
+#define PB_LANTERN_Y   165   // y of the lantern head (glowing box) center
+#define PB_LANTERN_HW    5   // lantern head half-width  (box = 2*HW+1 wide)
+#define PB_LANTERN_HH    7   // lantern head half-height (box = 2*HH+1 tall)
 
 // Footprint ring buffer (crab leaves prints in wet sand)
 #define PB_PRINT_MAX  12
@@ -999,15 +1376,53 @@ static uint8_t pb_print_tick  = 0;
 // Wave foam phase counter
 static uint8_t pb_wave_phase = 0;
 
-// Lighthouse beacon phase
-static unsigned long pb_beacon_last_ms = 0;
-static bool          pb_beacon_on      = false;
-static int           pb_beacon_frames  = 0;   // frames remaining while ON
+// ── Twinkling stars (a handful animate; the 38 baked stars stay static) ──────
+#define PB_TWINKLE_COUNT 12
+typedef struct { int16_t x, y; uint8_t bri, big; } PbStar;
+static PbStar pb_twinkle[PB_TWINKLE_COUNT];
+
+// ── Water glints (moon + lamp reflections shimmering on the sea) ─────────────
+#define PB_GLINT_COUNT 8
+typedef struct { int16_t x, y; uint8_t phase; } PbGlint;
+static PbGlint pb_glints[PB_GLINT_COUNT];
+static uint8_t pb_glint_tick = 0;
+
+// ── Lantern glow flicker phase ───────────────────────────────────────────────
+static uint8_t pb_lamp_phase = 0;
+
+// ── Occasional shooting star — erased each frame via bg_restore of its last
+//    drawn bounding box (Pixel Beach has no full-sky refill like Starfield) ────
+static bool          pb_shoot_active = false;
+static float         pb_shoot_x, pb_shoot_y, pb_shoot_vx, pb_shoot_vy;
+static unsigned long pb_shoot_next_ms = 0;
+static int           pb_shoot_x1, pb_shoot_y1, pb_shoot_x2, pb_shoot_y2;
 
 // Flat sand floor for this scene
 static inline int pixbeach_floor_y(int x) {
     (void)x;
     return PB_SAND_TOP;
+}
+
+// Computes the baked base sky/water/sand color at row y — IDENTICAL gradient to
+// the fill loop below (the fill depends only on y). The light cone uses this to
+// add warm light on top of the exact base color, so there is no visible seam.
+static inline void pixbeach_base_rgb(int y, float* r, float* g, float* b) {
+    if (y < PB_HORIZON) {
+        float f = (float)y / PB_HORIZON;
+        *r = 6.0f  + f * 20.0f;
+        *g = 7.0f  + f * 11.0f;
+        *b = 13.0f + f * 37.0f;
+    } else if (y < PB_SAND_TOP) {
+        float f = (float)(y - PB_HORIZON) / (PB_SAND_TOP - PB_HORIZON);
+        *r = 15.0f - f *  5.0f;
+        *g = 42.0f + f * 10.0f;
+        *b = 56.0f - f * 10.0f;
+    } else {
+        float f = (float)(y - PB_SAND_TOP) / (SCR_H - PB_SAND_TOP);
+        *r = 58.0f + f * 32.0f;
+        *g = 46.0f + f * 20.0f;
+        *b = 30.0f + f * 12.0f;
+    }
 }
 
 // Bake the static night-beach background into anim_bg.
@@ -1082,20 +1497,121 @@ static void pixbeach_bg_render() {
         }
     }
 
-    // Lighthouse silhouette (static baked pillar; beacon drawn per-frame)
-    // Pillar: 6 px wide, dark gray-blue
-    for (int ly = PB_LH_TOP + 10; ly < PB_LH_BASE; ly++) {
-        for (int lx = PB_LH_X - 3; lx <= PB_LH_X + 3; lx++) {
-            if (lx < 0 || lx >= SCR_W || ly < 0 || ly >= SCR_H) continue;
-            float shade = 0.7f + 0.3f * (float)(lx - (PB_LH_X - 3)) / 6.0f;
-            put_dith(anim_bg, lx, ly, 28.0f * shade, 36.0f * shade, 48.0f * shade);
+    // ── LIGHT CONE (baked, steady warm glow from the lantern down to the sand) ─
+    // Baked first so the solid post & bench (drawn next) occlude the beam, and
+    // so the crab walking through it is lit/erased correctly by bg_restore().
+    // Half-width grows with depth; intensity fades with distance + toward edges.
+    int cone_top = PB_LANTERN_Y + PB_LANTERN_HH;   // just below the lantern glass
+    int cone_bot = PB_LAMP_BASE + 4;               // pools at the post foot on the sand
+    for (int cy = cone_top; cy <= cone_bot; cy++) {
+        float depth = (float)(cy - cone_top) / (float)(cone_bot - cone_top); // 0..1
+        int   half  = 3 + (int)(depth * 34.0f);    // fan from ~3 px to ~37 px
+        float fall  = (1.0f - depth) * (1.0f - depth);  // brighter near the lamp
+        for (int dx = -half; dx <= half; dx++) {
+            int cx = PB_LAMP_X + dx;
+            if (cx < 0 || cx >= SCR_W || cy < 0 || cy >= SCR_H) continue;
+            float edge = 1.0f - (float)(dx < 0 ? -dx : dx) / (float)(half + 1);
+            float add  = 72.0f * fall * edge;       // warm additive intensity
+            float br, bg, bb;
+            pixbeach_base_rgb(cy, &br, &bg, &bb);
+            put_dith(anim_bg, cx, cy, br + add, bg + add * 0.78f, bb + add * 0.35f);
         }
     }
-    // Lantern room cap: 10 px wide, slightly lighter
-    for (int ly = PB_LH_TOP; ly < PB_LH_TOP + 10; ly++) {
-        for (int lx = PB_LH_X - 5; lx <= PB_LH_X + 5; lx++) {
+
+    // ── BOARDWALK LAMP POST (solid, baked on top of the cone) ─────────────────
+    // Foot / base plate planted in the sand
+    for (int ly = PB_LAMP_BASE - 1; ly <= PB_LAMP_BASE + 3; ly++)
+        for (int lx = PB_LAMP_X - 5; lx <= PB_LAMP_X + 5; lx++)
+            if (lx >= 0 && lx < SCR_W && ly >= 0 && ly < SCR_H)
+                put_dith(anim_bg, lx, ly, 30.0f, 24.0f, 18.0f);
+    // Vertical post: ~5 px weathered wood; lit side (toward lantern) a bit warmer
+    for (int ly = PB_LAMP_TOP + 4; ly < PB_LAMP_BASE; ly++) {
+        for (int lx = PB_LAMP_X - 2; lx <= PB_LAMP_X + 2; lx++) {
             if (lx < 0 || lx >= SCR_W || ly < 0 || ly >= SCR_H) continue;
-            put_dith(anim_bg, lx, ly, 55.0f, 65.0f, 80.0f);
+            float lit = (lx >= PB_LAMP_X) ? 1.15f : 0.80f;
+            put_dith(anim_bg, lx, ly, 74.0f * lit, 53.0f * lit, 38.0f * lit);
+        }
+    }
+    // Finial knob at the very top
+    for (int ly = PB_LAMP_TOP; ly <= PB_LAMP_TOP + 3; ly++)
+        for (int lx = PB_LAMP_X - 1; lx <= PB_LAMP_X + 1; lx++)
+            if (lx >= 0 && lx < SCR_W) put_dith(anim_bg, lx, ly, 70.0f, 52.0f, 36.0f);
+    // Lantern head: dark frame box with a warm glowing glass core
+    for (int ly = PB_LANTERN_Y - PB_LANTERN_HH; ly <= PB_LANTERN_Y + PB_LANTERN_HH; ly++) {
+        for (int lx = PB_LAMP_X - PB_LANTERN_HW; lx <= PB_LAMP_X + PB_LANTERN_HW; lx++) {
+            if (lx < 0 || lx >= SCR_W || ly < 0 || ly >= SCR_H) continue;
+            bool frame = (ly == PB_LANTERN_Y - PB_LANTERN_HH ||
+                          ly == PB_LANTERN_Y + PB_LANTERN_HH ||
+                          lx == PB_LAMP_X - PB_LANTERN_HW ||
+                          lx == PB_LAMP_X + PB_LANTERN_HW);
+            if (frame) put_dith(anim_bg, lx, ly, 42.0f, 42.0f, 48.0f);     // 0x2A2A30
+            else       put_dith(anim_bg, lx, ly, 245.0f, 232.0f, 160.0f);  // 0xF5E8A0
+        }
+    }
+
+    // ── WOODEN BENCH (in the lit sand, just left of the post foot) ────────────
+    {
+        int bx = PB_LAMP_X - 22;   // bench center, inside the left of the cone
+        int sy = 280;              // seat top y (on the dry sand, below the surf)
+        // Backrest slats (vertical)
+        for (int s = -14; s <= 14; s += 7)
+            for (int by = sy - 12; by < sy; by++)
+                if (bx + s >= 0 && bx + s < SCR_W)
+                    put_dith(anim_bg, bx + s, by, 106.0f, 74.0f, 48.0f);
+        // Top rail of the backrest (lit highlight)
+        for (int bxx = bx - 15; bxx <= bx + 15; bxx++)
+            if (bxx >= 0 && bxx < SCR_W)
+                put_dith(anim_bg, bxx, sy - 12, 138.0f, 106.0f, 68.0f);
+        // Seat plank (lit top edge, darker body)
+        for (int by = sy; by < sy + 4; by++)
+            for (int bxx = bx - 16; bxx <= bx + 16; bxx++)
+                if (bxx >= 0 && bxx < SCR_W)
+                    put_dith(anim_bg, bxx, by,
+                             (by == sy ? 138.0f : 106.0f),
+                             (by == sy ? 106.0f :  74.0f),
+                             (by == sy ?  68.0f :  48.0f));
+        // Two legs down to the sand
+        for (int by = sy + 4; by <= 292; by++)
+            for (int legi = 0; legi < 2; legi++) {
+                int bxx = bx + (legi ? 12 : -13);
+                if (bxx >= 0 && bxx < SCR_W)     put_dith(anim_bg, bxx,     by, 74.0f, 50.0f, 30.0f);
+                if (bxx + 1 >= 0 && bxx + 1 < SCR_W) put_dith(anim_bg, bxx + 1, by, 74.0f, 50.0f, 30.0f);
+            }
+    }
+
+    // ── STARFISH & SEASHELLS scattered on the dry sand ────────────────────────
+    static const int PB_SF[][2] = { { 70, 300 }, { 205, 290 } };   // starfish
+    for (int s = 0; s < 2; s++) {
+        int fx = PB_SF[s][0], fy = PB_SF[s][1];
+        aqua_blot(fx, fy, 2, 196.0f, 120.0f, 78.0f);   // body 0xC4784E
+        put_dith(anim_bg, fx,     fy - 4, 217.0f, 140.0f, 90.0f);  // 5 arms 0xD98C5A
+        put_dith(anim_bg, fx - 4, fy - 1, 217.0f, 140.0f, 90.0f);
+        put_dith(anim_bg, fx + 4, fy - 1, 217.0f, 140.0f, 90.0f);
+        put_dith(anim_bg, fx - 3, fy + 4, 217.0f, 140.0f, 90.0f);
+        put_dith(anim_bg, fx + 3, fy + 4, 217.0f, 140.0f, 90.0f);
+    }
+    static const int PB_SH[][2] = { { 120, 308 }, { 300, 298 }, { 440, 312 } }; // shells
+    for (int s = 0; s < 3; s++) {
+        int hx = PB_SH[s][0], hy = PB_SH[s][1];
+        aqua_blot(hx, hy, 2, 200.0f, 184.0f, 160.0f);  // fan body
+        put_dith(anim_bg, hx,     hy - 2, 232.0f, 216.0f, 192.0f);  // ridge 0xE8D8C0
+        put_dith(anim_bg, hx - 2, hy,     210.0f, 194.0f, 170.0f);
+        put_dith(anim_bg, hx + 2, hy,     210.0f, 194.0f, 170.0f);
+    }
+
+    // ── DUNE GRASS tufts near the lamp / bench ────────────────────────────────
+    static const int PB_GRASS[3] = { PB_LAMP_X + 20, PB_LAMP_X - 50, 44 };
+    for (int t = 0; t < 3; t++) {
+        int gx    = PB_GRASS[t];
+        int gbase = PB_SAND_TOP + 4 + t * 2;
+        for (int blade = -2; blade <= 2; blade++) {
+            int top = 9 - (blade < 0 ? -blade : blade) * 2;   // outer blades shorter
+            for (int h = 0; h <= top; h++) {
+                int yy = gbase - h;
+                int xx = gx + blade * 2 + (int)(h * 0.3f * (blade < 0 ? -1 : 1));
+                if (xx >= 0 && xx < SCR_W && yy >= 0 && yy < SCR_H)
+                    put_dith(anim_bg, xx, yy, 58.0f, 90.0f, 44.0f);  // 0x3A5A2C
+            }
         }
     }
 }
@@ -1105,9 +1621,30 @@ static void pixbeach_init() {
     pb_print_count = 0;
     pb_print_tick  = 0;
     pb_wave_phase  = 0;
-    pb_beacon_last_ms = millis();
-    pb_beacon_on      = false;
-    pb_beacon_frames  = 0;
+    pb_lamp_phase  = 0;
+    pb_glint_tick  = 0;
+
+    // Twinkling stars scattered in the sky (separate from the 38 baked stars)
+    for (int i = 0; i < PB_TWINKLE_COUNT; i++) {
+        pb_twinkle[i].x   = (int16_t)random(4, SCR_W - 24);
+        pb_twinkle[i].y   = (int16_t)random(3, PB_HORIZON - 34);
+        pb_twinkle[i].bri = (uint8_t)random(60, 200);
+        pb_twinkle[i].big = (random(0, 5) == 0) ? 1 : 0;
+    }
+
+    // Water glints: half cluster under the moon (right), half under the lamp post
+    for (int i = 0; i < PB_GLINT_COUNT; i++) {
+        bool moonside = (i < PB_GLINT_COUNT / 2);
+        int  base_x   = moonside ? (SCR_W - 90) : PB_LAMP_X;
+        pb_glints[i].x     = (int16_t)(base_x + random(-14, 15));
+        pb_glints[i].y     = (int16_t)random(PB_HORIZON + 4, PB_SAND_TOP - 3);
+        pb_glints[i].phase = (uint8_t)random(0, 255);
+    }
+
+    // Shooting star: idle, with an empty last-bbox so the first erase is a no-op
+    pb_shoot_active  = false;
+    pb_shoot_x1 = 0; pb_shoot_y1 = 0; pb_shoot_x2 = -1; pb_shoot_y2 = -1;
+    pb_shoot_next_ms = millis() + (unsigned long)random(15000, 45001);
 
     crab_state.x            = SCR_W * 0.35f;
     crab_state.vx           = 1.2f;
@@ -1136,48 +1673,120 @@ static void pixbeach_timer_cb(lv_timer_t*) {
     wd.bg_opa   = LV_OPA_60;
     pb_wave_phase++;
     for (int x = 0; x < SCR_W; x++) {
+        // The lamp post stands on the beach in front of the distant surf — don't
+        // paint foam over the part of the pole that crosses the waterline.
+        if (x >= PB_LAMP_X - 3 && x <= PB_LAMP_X + 3) continue;
         int wy = PB_SAND_TOP - 1 + (int)(2.0f * sinf((x + pb_wave_phase) * 0.08f));
         if (wy >= 0 && wy < SCR_H)
             lv_canvas_draw_rect(anim_canvas, x, wy, 1, 1, &wd);
     }
 
-    // ── LIGHTHOUSE BEACON ─────────────────────────────────────────────────────
-    unsigned long now_ms = millis();
-    if (!pb_beacon_on && (now_ms - pb_beacon_last_ms) >= PB_BEACON_MS) {
-        pb_beacon_on      = true;
-        pb_beacon_frames  = (int)(PB_BEACON_ON / 120);
-        if (pb_beacon_frames < 1) pb_beacon_frames = 1;
-        pb_beacon_last_ms = now_ms;
+    // ── SHOOTING STAR: ERASE previous streak first ────────────────────────────
+    // Done before the twinkle/glint draws so it can't wipe this frame's sprites.
+    if (pb_shoot_x2 >= pb_shoot_x1 && pb_shoot_y2 >= pb_shoot_y1)
+        bg_restore(pb_shoot_x1, pb_shoot_y1, pb_shoot_x2, pb_shoot_y2);
+    pb_shoot_x2 = -1; pb_shoot_y2 = -1;   // mark empty until (re)drawn below
+
+    // ── TWINKLING STARS ───────────────────────────────────────────────────────
+    {
+        lv_draw_rect_dsc_t sd;
+        lv_draw_rect_dsc_init(&sd);
+        sd.radius = 0; sd.border_width = 0;
+        for (int i = 0; i < PB_TWINKLE_COUNT; i++) {
+            int sx = pb_twinkle[i].x, sy = pb_twinkle[i].y;
+            int sz = pb_twinkle[i].big ? 2 : 1;
+            bg_restore(sx - 1, sy - 1, sx + sz, sy + sz);   // erase from baked sky
+            int nb = (int)pb_twinkle[i].bri + (int)random(-40, 41);
+            if (nb < 40)  nb = 40;
+            if (nb > 255) nb = 255;
+            pb_twinkle[i].bri = (uint8_t)nb;
+            sd.bg_color = lv_color_make((uint8_t)nb, (uint8_t)nb, (uint8_t)(nb * 0.92f));
+            if (nb > 170) {                                 // soft halo behind the core
+                sd.bg_opa = LV_OPA_20;
+                lv_canvas_draw_rect(anim_canvas, sx - 1, sy - 1, sz + 2, sz + 2, &sd);
+            }
+            sd.bg_opa = LV_OPA_COVER;                       // crisp bright core on top
+            lv_canvas_draw_rect(anim_canvas, sx, sy, sz, sz, &sd);
+        }
     }
 
-    // Always restore the beacon area first
-    bg_restore(PB_LH_X - 32, PB_LH_TOP - 4, PB_LH_X + 32, PB_LH_TOP + 10);
+    // ── WATER GLINTS (moon + lamp reflections shimmering on the sea) ──────────
+    pb_glint_tick++;
+    {
+        lv_draw_rect_dsc_t gd;
+        lv_draw_rect_dsc_init(&gd);
+        gd.radius = 0; gd.border_width = 0;
+        for (int i = 0; i < PB_GLINT_COUNT; i++) {
+            int gx = pb_glints[i].x, gy = pb_glints[i].y;
+            bg_restore(gx - 1, gy, gx + 2, gy + 1);
+            float sh = 0.5f + 0.5f * sinf((pb_glint_tick + pb_glints[i].phase) * 0.10f);
+            uint8_t v = (uint8_t)(60.0f + 120.0f * sh);
+            bool moonside = (i < PB_GLINT_COUNT / 2);
+            gd.bg_color = moonside
+                ? lv_color_make(v, v, (uint8_t)(v * 0.95f))                 // cool moon
+                : lv_color_make(v, (uint8_t)(v * 0.82f), (uint8_t)(v * 0.45f)); // warm lamp
+            gd.bg_opa = (lv_opa_t)(60 + (int)(120.0f * sh));
+            lv_canvas_draw_rect(anim_canvas, gx, gy, 2, 1, &gd);
+        }
+    }
 
-    if (pb_beacon_on) {
-        // Halo on lantern top
+    // ── LANTERN GLOW FLICKER (tiny breathing halo over the baked lantern) ─────
+    pb_lamp_phase++;
+    bg_restore(PB_LAMP_X - PB_LANTERN_HW - 2, PB_LANTERN_Y - PB_LANTERN_HH - 2,
+               PB_LAMP_X + PB_LANTERN_HW + 2, PB_LANTERN_Y + PB_LANTERN_HH + 2);
+    {
         lv_draw_rect_dsc_t hd;
         lv_draw_rect_dsc_init(&hd);
         hd.radius = LV_RADIUS_CIRCLE; hd.border_width = 0;
+        float fl = 0.78f + 0.22f * sinf(pb_lamp_phase * 0.18f);
         hd.bg_color = lv_color_hex(0xF5E8A0);
-        hd.bg_opa   = LV_OPA_50;
-        lv_canvas_draw_rect(anim_canvas, PB_LH_X - 4, PB_LH_TOP - 3, 9, 9, &hd);
+        hd.bg_opa   = (lv_opa_t)(70.0f * fl);
+        lv_canvas_draw_rect(anim_canvas, PB_LAMP_X - PB_LANTERN_HW - 1,
+                            PB_LANTERN_Y - PB_LANTERN_HH - 1,
+                            (PB_LANTERN_HW + 1) * 2 + 1, (PB_LANTERN_HH + 1) * 2 + 1, &hd);
+    }
 
-        // Amber wedge fan over water
-        lv_draw_rect_dsc_t rd2;
-        lv_draw_rect_dsc_init(&rd2);
-        rd2.radius = 0; rd2.border_width = 0;
-        rd2.bg_color = lv_color_hex(0xF59E0B);
-        for (int fy = PB_LH_TOP; fy < PB_LH_TOP + 30; fy++) {
-            int half = (fy - PB_LH_TOP) / 2 + 1;
-            int wx = PB_LH_X - half;
-            rd2.bg_opa = (lv_opa_t)(55 - (fy - PB_LH_TOP));
-            if (rd2.bg_opa < 5) rd2.bg_opa = 5;
-            if (wx >= 0 && wx + half * 2 <= SCR_W && fy >= 0 && fy < SCR_H)
-                lv_canvas_draw_rect(anim_canvas, wx, fy, half * 2, 1, &rd2);
+    // ── SHOOTING STAR: advance + draw (rare; 5-segment fading tail) ───────────
+    if (!pb_shoot_active && millis() >= pb_shoot_next_ms) {
+        pb_shoot_x  = (float)random(-30, SCR_W / 2);
+        pb_shoot_y  = (float)random(4, PB_HORIZON / 2);
+        float sp    = 6.0f + random(0, 30) * 0.1f;
+        float ang   = 0.35f + random(0, 40) * 0.005f;
+        pb_shoot_vx = sp * cosf(ang);
+        pb_shoot_vy = sp * sinf(ang);
+        pb_shoot_active = true;
+    }
+    if (pb_shoot_active) {
+        pb_shoot_x += pb_shoot_vx;
+        pb_shoot_y += pb_shoot_vy;
+        if (pb_shoot_x > SCR_W + 24 || pb_shoot_y > PB_HORIZON) {
+            pb_shoot_active  = false;
+            pb_shoot_next_ms = millis() + (unsigned long)random(20000, 90001);
+        } else {
+            lv_draw_line_dsc_t ld;
+            lv_draw_line_dsc_init(&ld);
+            int minx = SCR_W, miny = SCR_H, maxx = 0, maxy = 0;
+            for (int s = 0; s < 5; s++) {
+                lv_point_t pts[2];
+                pts[0].x = (lv_coord_t)(pb_shoot_x - pb_shoot_vx * s);
+                pts[0].y = (lv_coord_t)(pb_shoot_y - pb_shoot_vy * s);
+                pts[1].x = (lv_coord_t)(pb_shoot_x - pb_shoot_vx * (s + 1));
+                pts[1].y = (lv_coord_t)(pb_shoot_y - pb_shoot_vy * (s + 1));
+                uint8_t v = (uint8_t)(230 - s * 45);
+                ld.color = lv_color_make(v, v, 255);
+                ld.width = (s < 2) ? 2 : 1;
+                ld.opa   = (lv_opa_t)(255 - s * 45);
+                lv_canvas_draw_line(anim_canvas, pts, 2, &ld);
+                for (int k = 0; k < 2; k++) {
+                    if (pts[k].x < minx) minx = pts[k].x;
+                    if (pts[k].y < miny) miny = pts[k].y;
+                    if (pts[k].x > maxx) maxx = pts[k].x;
+                    if (pts[k].y > maxy) maxy = pts[k].y;
+                }
+            }
+            pb_shoot_x1 = minx - 2; pb_shoot_y1 = miny - 2;   // padded bbox for erase
+            pb_shoot_x2 = maxx + 2; pb_shoot_y2 = maxy + 2;
         }
-
-        pb_beacon_frames--;
-        if (pb_beacon_frames <= 0) pb_beacon_on = false;
     }
 
     // ── CRAB + FOOTPRINTS ─────────────────────────────────────────────────────
@@ -1261,154 +1870,253 @@ static void pixbeach_timer_cb(lv_timer_t*) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// MARKET PIT (EASTER EGG)
+// ROLLING GRASSLAND (dawn meadow)
 // ══════════════════════════════════════════════════════════════════════════════
-#define PIT_FLOOR_Y   260   // y of the trading floor surface
-#define PIT_BOARD_Y     8   // y of ticker board top
-#define PIT_BOARD_H    26   // height of the board strip
-#define PIT_BELL_CX   240   // bell center x (mid-screen)
-#define PIT_BELL_CY    50   // bell center y
-#define PIT_BELL_PERIOD_MS  15000
-#define PIT_BOARD_CELLS      6
-#define PIT_BOARD_CELL_W    75   // (480 / 6 = 80, minus 5 gap)
+// A calm sunrise meadow: layered rolling hills under a soft dawn sky, a lone tree,
+// a warm rising sun, drifting clouds, swaying grass, fluttering butterflies and a
+// couple of distant birds. The pixel crab walks the foreground. Built on the same
+// bake-once (anim_bg) + per-frame-sprite (bg_restore) engine as the other scenes.
+#define GR_HILL_TOP    138   // y where the farthest hills meet the sky
+#define GR_SUN_X       360   // rising-sun center x (right of center)
+#define GR_SUN_Y        66   // sun center y (low in the dawn sky)
+#define GR_SUN_R        18   // sun disc radius
 
-// Fake ticker symbols for the board
-static const char* const PIT_TICKERS[PIT_BOARD_CELLS] = {
-    "AAPL", "BTC", "NVDA", "SPY", "GOLD", "TSLA"
+// Foreground meadow surface where the crab walks (gentle roll).
+static inline int grass_floor_y(int x) {
+    return (int)(SCR_H - 40
+                 + 4.0f * sinf(x * 0.016f)
+                 + 2.0f * sinf(x * 0.06f + 1.1f));
+}
+
+// Drifting clouds (slow, wrap around). w = size variant 0..2.
+#define GR_CLOUD_COUNT 3
+static struct { float x; int16_t y; float vx; uint8_t w; } gr_cloud[GR_CLOUD_COUNT];
+
+// Swaying grass tufts along the very foreground (below the crab).
+#define GR_TUFT_COUNT 14
+static struct { int16_t x, base; uint8_t phase; } gr_tuft[GR_TUFT_COUNT];
+static uint8_t gr_anim_tick = 0;   // shared tick for sway / flutter
+
+// Fluttering butterflies wandering over the meadow.
+#define GR_BFLY_COUNT 3
+static struct { float x, y; uint8_t phase, wing; } gr_bfly[GR_BFLY_COUNT];
+
+// A couple of distant birds drifting across the sky.
+#define GR_BIRD_COUNT 2
+static struct { float x; int16_t y; float vx; } gr_bird[GR_BIRD_COUNT];
+
+// Hill bands (back→front). Front band fills down to the bottom of the screen.
+// Shared by grass_bg_render() and the lone-tree placement so the tree sits on the
+// mid hill's surface exactly.
+static const struct { int base, amp; float fr, ph, r, g, b; } GR_BAND[3] = {
+    { 150, 12, 0.013f, 0.0f, 132.0f, 168.0f, 96.0f },  // far hazy green
+    { 188, 18, 0.011f, 2.1f,  92.0f, 144.0f, 70.0f },  // mid green
+    { 224, 16, 0.009f, 4.3f,  60.0f, 112.0f, 48.0f },  // near green (to bottom)
 };
 
-// Per-cell fake price strings (updated by flicker)
-static char pit_prices[PIT_BOARD_CELLS][8];
-static bool pit_cell_up[PIT_BOARD_CELLS];
-
-static unsigned long pit_bell_last_ms  = 0;
-static int           pit_bell_frames   = 0;
-
-// Ticket wave state: held above crab's right claw
-static uint8_t pit_ticket_tick  = 0;
-static int8_t  pit_ticket_flip  = 0;    // ±1 px y wobble
-
-// Board flicker state
-static uint8_t pit_flicker_tick = 0;
-
-// Draw one ticker-board cell at column i into a canvas (for both bake + flicker).
-static void pit_draw_cell(lv_obj_t* canvas, int i, bool baked_mode) {
-    int cx = i * (PIT_BOARD_CELL_W + 5) + 5;
-    lv_draw_rect_dsc_t bd;
-    lv_draw_rect_dsc_init(&bd);
-    bd.radius = 0; bd.border_width = 0;
-    bd.bg_color = lv_color_hex(0x0A0A06);
-    lv_canvas_draw_rect(canvas, cx, PIT_BOARD_Y, PIT_BOARD_CELL_W, PIT_BOARD_H, &bd);
-
-    // Ticker symbol in Amber
-    lv_draw_label_dsc_t ld;
-    lv_draw_label_dsc_init(&ld);
-    ld.color = lv_color_hex(0xF59E0B);
-    ld.font  = &lv_font_montserrat_10;
-    lv_point_t p1 = { (lv_coord_t)(cx + 3), (lv_coord_t)(PIT_BOARD_Y + 2) };
-    lv_canvas_draw_text(canvas, p1.x, p1.y, PIT_BOARD_CELL_W - 4, &ld,
-                        PIT_TICKERS[i]);
-
-    // Price + arrow in Green/Red
-    lv_draw_label_dsc_t pd;
-    lv_draw_label_dsc_init(&pd);
-    pd.color = pit_cell_up[i] ? lv_color_hex(0x22C55E) : lv_color_hex(0xEF4444);
-    pd.font  = &lv_font_montserrat_10;
-    lv_point_t p2 = { (lv_coord_t)(cx + 3), (lv_coord_t)(PIT_BOARD_Y + 13) };
-    lv_canvas_draw_text(canvas, p2.x, p2.y, PIT_BOARD_CELL_W - 4, &pd,
-                        pit_prices[i]);
-    (void)baked_mode;
+// Surface y of hill band b at column x (where trees/bushes sit on that hill).
+static inline int gr_band_surface(int b, int x) {
+    return GR_BAND[b].base - (int)(GR_BAND[b].amp * sinf(x * GR_BAND[b].fr + GR_BAND[b].ph));
 }
 
-// Add pinstripe overlay on crab's shell (market pit costume).
-// Call immediately after draw_crab for this scene only — does not touch draw_crab.
-static void draw_pinstripes(lv_obj_t* canvas, int cx, int cy) {
-    lv_draw_rect_dsc_t rd;
-    lv_draw_rect_dsc_init(&rd);
-    rd.radius = 0; rd.border_width = 0;
-    rd.bg_color = lv_color_hex(0xDDE0E8);
-    rd.bg_opa   = LV_OPA_50;
-    // Three 1-px vertical lines across the shell body band (SVG y 24-33 → canvas)
-    int base_y = cy + (24 - 27);
-    int h = 9;
-    for (int s = 0; s < 3; s++) {
-        int sx = cx + (17 - 24) + s * 6;   // spaced 6 px apart
-        lv_canvas_draw_rect(canvas, sx, base_y, 1, h, &rd);
-    }
+// Bakes a simple pixel tree (trunk + rounded canopy) into anim_bg. Trunk foot sits
+// at (tx, base_y); cr = canopy radius (smaller = more distant). Canopy uses
+// overlapping aqua_blot blobs (green-on-green blends cleanly, no banding).
+static void grass_bake_tree(int tx, int base_y, int cr) {
+    int th = cr + 10;                                  // trunk height grows with canopy
+    int tw = (cr >= 12) ? 2 : 1;                       // trunk half-width
+    for (int ty = base_y - th; ty <= base_y; ty++)
+        for (int txx = tx - tw; txx <= tx + tw - 1; txx++)
+            if (txx >= 0 && txx < SCR_W && ty >= 0 && ty < SCR_H)
+                put_dith(anim_bg, txx, ty, 74.0f, 52.0f, 32.0f);
+    int cy = base_y - th + 2;                           // canopy center
+    aqua_blot(tx,                 cy,                cr,             48.0f, 104.0f, 44.0f);
+    aqua_blot(tx - (cr * 7) / 10, cy + cr / 3,       (cr * 7) / 10,  44.0f,  96.0f, 40.0f);
+    aqua_blot(tx + (cr * 7) / 10, cy + cr / 3,       (cr * 7) / 10,  44.0f,  96.0f, 40.0f);
+    aqua_blot(tx - cr / 3,        cy - (cr * 4) / 10, (cr * 11) / 20, 70.0f, 132.0f, 58.0f); // sunlit top
 }
 
-static void pit_bg_render() {
+// Bake the static meadow background into anim_bg.
+static void grass_bg_render() {
     if (!anim_bg) return;
 
-    // Room wall gradient: warm amber at top → dark amber at floor
+    // ── SKY + base meadow fill ────────────────────────────────────────────────
     for (int y = 0; y < SCR_H; y++) {
-        float f = (float)y / SCR_H;
-        float r, g, b;
-        if (y >= PIT_FLOOR_Y) {
-            // Hardwood floor: dark chestnut
-            float ff = (float)(y - PIT_FLOOR_Y) / (SCR_H - PIT_FLOOR_Y);
-            r = 28.0f + ff * 14.0f;
-            g = 16.0f + ff *  8.0f;
-            b =  6.0f + ff *  4.0f;
-        } else {
-            r = 58.0f - f * 32.0f;
-            g = 40.0f - f * 25.0f;
-            b = 24.0f - f * 18.0f;
-        }
-        for (int x = 0; x < SCR_W; x++)
+        for (int x = 0; x < SCR_W; x++) {
+            float r, g, b;
+            if (y < GR_HILL_TOP) {
+                // Dawn sky: soft blue at top → warm cream near the hilltops.
+                float f = (float)y / GR_HILL_TOP;            // 0 (top) .. 1 (horizon)
+                r = 116.0f + f * 140.0f;
+                g = 158.0f + f *  74.0f;
+                b = 206.0f - f *  44.0f;
+            } else {
+                // Base meadow green (the hill bands paint over this next).
+                r = 70.0f; g = 120.0f; b = 56.0f;
+            }
             put_dith(anim_bg, x, y, r, g, b);
+        }
     }
 
-    // Hardwood floor planks: subtle horizontal lines
-    lv_draw_rect_dsc_t fld;
-    lv_draw_rect_dsc_init(&fld);
-    fld.radius = 0; fld.border_width = 0;
-    fld.bg_color = lv_color_hex(0x100808);
-    fld.bg_opa   = LV_OPA_40;
-    for (int py = PIT_FLOOR_Y + 12; py < SCR_H; py += 14) {
-        // Bake directly into anim_bg as horizontal stripe
-        for (int bx = 0; bx < SCR_W; bx++)
-            put_dith(anim_bg, bx, py, 10.0f, 6.0f, 3.0f);
+    // ── RISING SUN: clean solid orange disc with a soft warm glow ─────────────
+    // A simple, crisp orange sun (no layered haze rings — the old stacked blots
+    // banded into a muddy "ball of yarn"). The glow fades smoothly into the dawn
+    // sky by blending toward the exact sky color at each row, so there is no ring.
+    {
+        int sr   = GR_SUN_R;          // solid disc radius
+        int gr_o = GR_SUN_R + 14;     // outer glow radius
+        for (int dy = -gr_o; dy <= gr_o; dy++) {
+            int y = GR_SUN_Y + dy;
+            if (y < 0 || y >= SCR_H) continue;
+            // Sky base color at this row (same formula as the sky fill above).
+            float f   = (float)y / GR_HILL_TOP;
+            float sky_r = 116.0f + f * 140.0f;
+            float sky_g = 158.0f + f *  74.0f;
+            float sky_b = 206.0f - f *  44.0f;
+            for (int dx = -gr_o; dx <= gr_o; dx++) {
+                int x = GR_SUN_X + dx;
+                if (x < 0 || x >= SCR_W) continue;
+                float d = sqrtf((float)(dx * dx + dy * dy));
+                if (d <= sr) {
+                    // Solid orange disc, a touch brighter toward the center.
+                    float c = 1.0f - d / (float)(sr + 1);   // 1 center .. 0 rim
+                    put_dith(anim_bg, x, y,
+                             250.0f + 5.0f * c, 140.0f + 40.0f * c, 40.0f + 30.0f * c);
+                } else if (d <= gr_o) {
+                    // Smooth glow: fade a warm orange tint into the sky.
+                    float t = (d - sr) / (float)(gr_o - sr);    // 0 rim .. 1 out
+                    float k = (1.0f - t) * (1.0f - t) * 0.85f;  // glow strength
+                    put_dith(anim_bg, x, y,
+                             sky_r + (255.0f - sky_r) * k,
+                             sky_g + (170.0f - sky_g) * k,
+                             sky_b + ( 60.0f - sky_b) * k);
+                }
+            }
+        }
     }
 
-    // Ticker board border (top strip)
-    for (int by = PIT_BOARD_Y; by < PIT_BOARD_Y + PIT_BOARD_H + 2; by++) {
-        for (int bx = 0; bx < SCR_W; bx++)
-            put_dith(anim_bg, bx, by, 8.0f, 8.0f, 5.0f);
+    // ── ROLLING HILLS (3 layered sine bands, back→front) ──────────────────────
+    for (int hb = 0; hb < 3; hb++) {
+        for (int x = 0; x < SCR_W; x++) {
+            int top = GR_BAND[hb].base
+                      - (int)(GR_BAND[hb].amp * sinf(x * GR_BAND[hb].fr + GR_BAND[hb].ph));
+            for (int y = top; y < SCR_H; y++)
+                if (y >= 0) put_dith(anim_bg, x, y, GR_BAND[hb].r, GR_BAND[hb].g, GR_BAND[hb].b);
+        }
     }
 
-    // Bell (brass disc above center)
-    aqua_blot(PIT_BELL_CX, PIT_BELL_CY, 10, 180.0f, 130.0f, 30.0f);
-    aqua_blot(PIT_BELL_CX - 2, PIT_BELL_CY - 3, 4, 220.0f, 185.0f, 80.0f); // shine
-    // Bell handle
-    for (int bh = PIT_BELL_CY - 18; bh < PIT_BELL_CY - 10; bh++) {
-        if (bh >= 0 && bh < SCR_H)
-            put_dith(anim_bg, PIT_BELL_CX, bh, 100.0f, 72.0f, 18.0f);
+    // ── TREES (a few, varied sizes, each sitting on its hill surface) ─────────
+    grass_bake_tree( 96, gr_band_surface(1,  96) - 1, 14);   // mid (original spot)
+    grass_bake_tree(178, gr_band_surface(2, 178) - 1, 18);   // near, larger foreground
+    grass_bake_tree(300, gr_band_surface(1, 300) - 1, 12);   // mid
+    grass_bake_tree(248, gr_band_surface(0, 248) - 1,  8);   // far, small + hazy
+    grass_bake_tree(432, gr_band_surface(0, 432) - 1,  7);   // far, small
+
+    // ── BUSHES / SHRUBS (low rounded blobs nestled on the hills) ──────────────
+    static const int GR_BUSH[][3] = {   // x, band, radius
+        { 140, 2, 6 }, { 352, 2, 7 }, { 60, 1, 5 }, { 402, 1, 5 }, { 212, 1, 4 }
+    };
+    for (int i = 0; i < 5; i++) {
+        int bx = GR_BUSH[i][0], bb = GR_BUSH[i][1], br = GR_BUSH[i][2];
+        int by = gr_band_surface(bb, bx) - br / 2;
+        aqua_blot(bx,      by, br,             46.0f, 98.0f, 42.0f);
+        aqua_blot(bx - br, by, (br * 2) / 3,   42.0f, 90.0f, 38.0f);
+        aqua_blot(bx + br, by, (br * 2) / 3,   42.0f, 90.0f, 38.0f);
     }
 
-    // Init fake prices before baking board cells
-    for (int i = 0; i < PIT_BOARD_CELLS; i++) {
-        pit_cell_up[i] = (bool)(random(0, 2));
-        int price = random(80, 999);
-        snprintf(pit_prices[i], sizeof(pit_prices[i]),
-                 "%s%3d", pit_cell_up[i] ? "\x18" : "\x19", price);
+    // ── ROCKS / BOULDERS (grey blots on the near meadow) ──────────────────────
+    static const int GR_ROCK[][2] = { { 120, 250 }, { 330, 272 }, { 268, 300 } };
+    for (int i = 0; i < 3; i++) {
+        int rx = GR_ROCK[i][0], ry = GR_ROCK[i][1];
+        aqua_blot(rx,     ry,     3, 120.0f, 120.0f, 116.0f);          // body
+        aqua_blot(rx - 2, ry + 1, 2, 100.0f, 100.0f,  96.0f);          // shadow side
+        put_dith(anim_bg, rx - 1, ry - 2, 156.0f, 156.0f, 150.0f);     // lit top edge
     }
 
-    // Bake board cells (text drawn into anim_bg via a temporary canvas op — we
-    // just bake the background rectangles; cell text is drawn each frame via
-    // anim_canvas since lv_canvas_draw_text draws to the canvas, not the raw buf)
-    // Board cell text will be re-rendered each frame (cheap: only 6 small labels).
+    // ── MEADOW TEXTURE: grass flecks + a few tiny flowers (front band only) ───
+    for (int p = 0; p < 120; p++) {
+        int px = random(0, SCR_W);
+        int py = random(GR_BAND[2].base - 8, SCR_H);
+        if (py < 0 || py >= SCR_H) continue;
+        if (random(0, 10) == 0) {
+            // tiny flower: white or yellow speck
+            uint32_t fc = random(0, 2) ? 0xF4F4E0 : 0xF2D24A;
+            put_dith(anim_bg, px, py,
+                     (float)((fc >> 16) & 0xFF), (float)((fc >> 8) & 0xFF), (float)(fc & 0xFF));
+        } else {
+            float v = random(0, 2) ? 1.18f : 0.82f;       // lighter / darker green fleck
+            put_dith(anim_bg, px, py, 60.0f * v, 112.0f * v, 48.0f * v);
+        }
+    }
+
+    // ── FLOWER CLUSTERS (a few stemmed blooms dotted across the foreground) ───
+    static const int GR_FLOWER[][3] = {   // x, y, color (0 = pink, 1 = yellow)
+        { 78, 300, 0 }, { 250, 286, 1 }, { 360, 306, 0 }, { 150, 312, 1 }, { 428, 296, 0 }
+    };
+    for (int i = 0; i < 5; i++) {
+        int fx = GR_FLOWER[i][0], fy = GR_FLOWER[i][1];
+        uint32_t pc = GR_FLOWER[i][2] ? 0xF2D24A : 0xF06A8A;   // yellow or pink petals
+        float pr = (float)((pc >> 16) & 0xFF), pg = (float)((pc >> 8) & 0xFF), pb = (float)(pc & 0xFF);
+        // short green stem
+        for (int s = 1; s <= 4; s++)
+            if (fy + s < SCR_H) put_dith(anim_bg, fx, fy + s, 52.0f, 100.0f, 44.0f);
+        // 4-petal bloom + sunny center
+        put_dith(anim_bg, fx,     fy - 1, pr, pg, pb);
+        put_dith(anim_bg, fx - 1, fy,     pr, pg, pb);
+        put_dith(anim_bg, fx + 1, fy,     pr, pg, pb);
+        put_dith(anim_bg, fx,     fy + 1, pr, pg, pb);
+        put_dith(anim_bg, fx,     fy,     250.0f, 230.0f, 90.0f);
+    }
+
+    // ── GLOBAL DIM: knock the whole baked scene back ~15% for a softer mood ────
+    // One uniform pass over the finished background so sky, sun, hills, trees,
+    // bushes, rocks and flowers all darken together (the crab and other live
+    // sprites keep their normal colors). 0.85 = 15% darker.
+    for (int i = 0; i < SCR_W * SCR_H; i++) {
+        lv_color32_t c;
+        c.full = lv_color_to32(anim_bg[i]);
+        anim_bg[i] = lv_color_make((uint8_t)(c.ch.red   * 0.85f),
+                                   (uint8_t)(c.ch.green * 0.85f),
+                                   (uint8_t)(c.ch.blue  * 0.85f));
+    }
 }
 
-static void pit_init() {
-    pit_bell_last_ms  = millis();
-    pit_bell_frames   = 0;
-    pit_ticket_tick   = 0;
-    pit_ticket_flip   = 0;
-    pit_flicker_tick  = 0;
+static void grass_init() {
+    gr_anim_tick = 0;
 
-    crab_state.x            = SCR_W * 0.40f;
-    crab_state.vx           = 1.1f;
+    // Clouds spread across the sky, slow rightward drift.
+    for (int i = 0; i < GR_CLOUD_COUNT; i++) {
+        gr_cloud[i].x  = (float)random(0, SCR_W);
+        gr_cloud[i].y  = (int16_t)random(18, GR_HILL_TOP - 40);
+        gr_cloud[i].vx = 0.20f + random(0, 25) * 0.01f;   // 0.20..0.45 px/frame
+        gr_cloud[i].w  = (uint8_t)random(0, 3);
+    }
+
+    // Grass tufts spaced across the foreground, each with its own sway phase.
+    for (int i = 0; i < GR_TUFT_COUNT; i++) {
+        int gx = 16 + i * ((SCR_W - 32) / (GR_TUFT_COUNT - 1));
+        gr_tuft[i].x     = (int16_t)gx;
+        gr_tuft[i].base  = (int16_t)(SCR_H - 4 - random(0, 6));   // very foreground
+        gr_tuft[i].phase = (uint8_t)random(0, 255);
+    }
+
+    // Butterflies wandering over the meadow.
+    for (int i = 0; i < GR_BFLY_COUNT; i++) {
+        gr_bfly[i].x     = (float)random(40, SCR_W - 40);
+        gr_bfly[i].y     = (float)random(GR_HILL_TOP - 6, SCR_H - 70);
+        gr_bfly[i].phase = (uint8_t)random(0, 255);
+        gr_bfly[i].wing  = 0;
+    }
+
+    // Distant birds drifting across the sky.
+    for (int i = 0; i < GR_BIRD_COUNT; i++) {
+        gr_bird[i].x  = (float)random(0, SCR_W);
+        gr_bird[i].y  = (int16_t)random(24, 70);
+        gr_bird[i].vx = 0.5f + random(0, 8) * 0.1f;
+    }
+
+    crab_state.x            = SCR_W * 0.4f;
+    crab_state.vx           = 1.2f;
     crab_state.right        = true;
     crab_state.walk_frame   = 0;
     crab_state.walk_tick    = 0;
@@ -1418,58 +2126,114 @@ static void pit_init() {
     crab_state.celebrate_fr = 0;
 }
 
-static void pit_timer_cb(lv_timer_t*) {
+// Draws a soft pixel cloud (a body puff + two side lobes) at (cx,cy) onto the canvas.
+static void grass_draw_cloud(int cx, int cy, int wv) {
+    lv_draw_rect_dsc_t cd;
+    lv_draw_rect_dsc_init(&cd);
+    cd.radius = LV_RADIUS_CIRCLE; cd.border_width = 0;
+    int w = 16 + wv * 5;
+    cd.bg_color = lv_color_hex(0xF4F6FA);
+    cd.bg_opa   = LV_OPA_70;
+    lv_canvas_draw_rect(anim_canvas, cx - w / 2,     cy - 4, w,  10, &cd);  // body
+    cd.bg_opa = LV_OPA_60;
+    lv_canvas_draw_rect(anim_canvas, cx - w / 2 - 6, cy - 1, 12,  8, &cd);  // left lobe
+    lv_canvas_draw_rect(anim_canvas, cx + w / 2 - 6, cy - 6, 14, 12, &cd);  // right lobe
+}
+
+// Draws a swaying grass tuft (5 blades; tips lean with the shared sway tick).
+static void grass_draw_tuft(int gx, int base, uint8_t phase, uint8_t tick) {
+    float s = sinf((tick + phase) * 0.12f);     // -1..1 lean
+    lv_draw_line_dsc_t bd;
+    lv_draw_line_dsc_init(&bd);
+    bd.width = 1;
+    bd.color = lv_color_make(61, 112, 48);   // ~15% dimmed to match the darkened meadow
+    for (int blade = -2; blade <= 2; blade++) {
+        int absb  = blade < 0 ? -blade : blade;
+        int h     = 10 - absb * 2;                       // center blade tallest
+        int tipdx = (int)(s * (3 + absb));               // outer blades lean more
+        lv_point_t pts[2];
+        pts[0].x = (lv_coord_t)(gx + blade * 2);          pts[0].y = (lv_coord_t)base;
+        pts[1].x = (lv_coord_t)(gx + blade * 2 + tipdx);  pts[1].y = (lv_coord_t)(base - h);
+        lv_canvas_draw_line(anim_canvas, pts, 2, &bd);
+    }
+}
+
+// Draws a tiny butterfly (dark body + two warm wings whose spread flaps with `wing`).
+static void grass_draw_bfly(int cx, int cy, uint8_t wing) {
+    lv_draw_rect_dsc_t wd;
+    lv_draw_rect_dsc_init(&wd);
+    wd.radius = 0; wd.border_width = 0;
+    wd.bg_color = lv_color_hex(0x2A1A0E);                 // body
+    lv_canvas_draw_rect(anim_canvas, cx, cy, 1, 3, &wd);
+    wd.bg_color = lv_color_hex(0xF2A23A);                 // warm orange wings
+    int sp = wing ? 1 : 2;                                // flap spread
+    lv_canvas_draw_rect(anim_canvas, cx - sp - 1, cy, sp + 1, 2, &wd);  // left
+    lv_canvas_draw_rect(anim_canvas, cx + 1,      cy, sp + 1, 2, &wd);  // right
+}
+
+static void grass_timer_cb(lv_timer_t*) {
     if (!anim_canvas || !anim_bg) return;
     wdt_feed();
+    gr_anim_tick++;
 
-    // ── TICKER BOARD (top strip, redrawn each frame) ──────────────────────────
-    // Erase the whole board strip from bg, then redraw all 6 cells fresh.
-    bg_restore(0, PIT_BOARD_Y - 1, SCR_W - 1, PIT_BOARD_Y + PIT_BOARD_H + 2);
-    for (int i = 0; i < PIT_BOARD_CELLS; i++)
-        pit_draw_cell(anim_canvas, i, false);
-
-    // Price flicker: one random cell updates every ~25 frames
-    pit_flicker_tick++;
-    if (pit_flicker_tick >= 25) {
-        pit_flicker_tick = 0;
-        int idx = random(0, PIT_BOARD_CELLS);
-        pit_cell_up[idx] = (bool)(random(0, 2));
-        int price = random(80, 999);
-        snprintf(pit_prices[idx], sizeof(pit_prices[idx]),
-                 "%s%3d", pit_cell_up[idx] ? "\x18" : "\x19", price);
+    // ── CLOUDS (drift right, wrap) ────────────────────────────────────────────
+    for (int i = 0; i < GR_CLOUD_COUNT; i++) {
+        int w  = 16 + gr_cloud[i].w * 5;
+        int cx = (int)gr_cloud[i].x, cy = gr_cloud[i].y;
+        bg_restore(cx - w / 2 - 8, cy - 8, cx + w / 2 + 9, cy + 8);   // erase old
+        gr_cloud[i].x += gr_cloud[i].vx;
+        if (gr_cloud[i].x > SCR_W + w) gr_cloud[i].x = (float)(-w);
+        grass_draw_cloud((int)gr_cloud[i].x, cy, gr_cloud[i].w);
     }
 
-    // ── BELL FLASH ────────────────────────────────────────────────────────────
-    unsigned long now_ms = millis();
-    if (pit_bell_frames == 0 && (now_ms - pit_bell_last_ms) >= PIT_BELL_PERIOD_MS) {
-        pit_bell_frames   = 6;
-        pit_bell_last_ms  = now_ms;
+    // ── DISTANT BIRDS (slow v-shapes) ─────────────────────────────────────────
+    {
+        lv_draw_line_dsc_t bd;
+        lv_draw_line_dsc_init(&bd);
+        bd.width = 1; bd.color = lv_color_hex(0x3A3A46);
+        for (int i = 0; i < GR_BIRD_COUNT; i++) {
+            int bx = (int)gr_bird[i].x, by = gr_bird[i].y;
+            bg_restore(bx - 5, by - 3, bx + 5, by + 3);
+            gr_bird[i].x += gr_bird[i].vx;
+            if (gr_bird[i].x > SCR_W + 6) { gr_bird[i].x = -6.0f; gr_bird[i].y = (int16_t)random(24, 70); }
+            int nbx = (int)gr_bird[i].x;
+            lv_point_t p1[2] = { { (lv_coord_t)(nbx - 4), (lv_coord_t)(by + 2) },
+                                 { (lv_coord_t)nbx,       (lv_coord_t)(by - 1) } };
+            lv_point_t p2[2] = { { (lv_coord_t)nbx,       (lv_coord_t)(by - 1) },
+                                 { (lv_coord_t)(nbx + 4), (lv_coord_t)(by + 2) } };
+            lv_canvas_draw_line(anim_canvas, p1, 2, &bd);
+            lv_canvas_draw_line(anim_canvas, p2, 2, &bd);
+        }
     }
 
-    bg_restore(PIT_BELL_CX - 16, PIT_BELL_CY - 22, PIT_BELL_CX + 16, PIT_BELL_CY + 14);
-    if (pit_bell_frames > 0) {
-        lv_draw_rect_dsc_t bfd;
-        lv_draw_rect_dsc_init(&bfd);
-        bfd.radius = LV_RADIUS_CIRCLE; bfd.border_width = 0;
-        bfd.bg_color = lv_color_hex(0xF59E0B);
-        bfd.bg_opa   = LV_OPA_40;
-        lv_canvas_draw_rect(anim_canvas,
-                            PIT_BELL_CX - 14, PIT_BELL_CY - 14, 29, 29, &bfd);
-        pit_bell_frames--;
+    // ── BUTTERFLIES (flutter + bob) ───────────────────────────────────────────
+    for (int i = 0; i < GR_BFLY_COUNT; i++) {
+        int ox = (int)gr_bfly[i].x, oy = (int)gr_bfly[i].y;
+        bg_restore(ox - 5, oy - 2, ox + 5, oy + 5);
+        gr_bfly[i].x += 0.6f * sinf((gr_anim_tick + gr_bfly[i].phase) * 0.05f) + 0.3f;
+        gr_bfly[i].y += 0.8f * sinf((gr_anim_tick * 2 + gr_bfly[i].phase) * 0.09f);
+        if (gr_bfly[i].x > SCR_W - 6)          gr_bfly[i].x = 6.0f;
+        if (gr_bfly[i].y < GR_HILL_TOP - 10)   gr_bfly[i].y = (float)(GR_HILL_TOP - 10);
+        if (gr_bfly[i].y > SCR_H - 60)         gr_bfly[i].y = (float)(SCR_H - 60);
+        gr_bfly[i].wing ^= 1;
+        grass_draw_bfly((int)gr_bfly[i].x, (int)gr_bfly[i].y, gr_bfly[i].wing);
     }
 
-    // ── CRAB WALK ─────────────────────────────────────────────────────────────
+    // ── SWAYING GRASS TUFTS (very foreground, below the crab) ─────────────────
+    for (int i = 0; i < GR_TUFT_COUNT; i++) {
+        int gx = gr_tuft[i].x, gb = gr_tuft[i].base;
+        bg_restore(gx - 10, gb - 13, gx + 10, gb + 1);
+        grass_draw_tuft(gx, gb, gr_tuft[i].phase, gr_anim_tick);
+    }
+
+    // ── CRAB (walks the foreground; drawn last so it stays in front) ──────────
     crab_state.walk_tick++;
-    if (crab_state.walk_tick >= 8) {
-        crab_state.walk_tick  = 0;
-        crab_state.walk_frame ^= 1;
-    }
+    if (crab_state.walk_tick >= 8) { crab_state.walk_tick = 0; crab_state.walk_frame ^= 1; }
 
     if (crab_state.blinking) {
         if (crab_state.blink_cd > 0) crab_state.blink_cd--;
         if (crab_state.blink_cd == 0) {
-            crab_state.blinking = false;
-            crab_state.blink_cd = (uint16_t)random(100, 220);
+            crab_state.blinking = false; crab_state.blink_cd = (uint16_t)random(100, 220);
         }
     } else {
         if (crab_state.blink_cd > 0) crab_state.blink_cd--;
@@ -1477,36 +2241,23 @@ static void pit_timer_cb(lv_timer_t*) {
     }
 
     bool celebrating = false;
-    if (crab_state.celebrate_fr > 0) {
-        crab_state.celebrate_fr--;
-        celebrating = true;
-    } else if (crab_state.celebrate_cd > 0) {
-        crab_state.celebrate_cd--;
-    } else {
-        crab_state.celebrate_fr = 24;
-        crab_state.celebrate_cd = (uint16_t)random(160, 240);
-    }
+    if (crab_state.celebrate_fr > 0)      { crab_state.celebrate_fr--; celebrating = true; }
+    else if (crab_state.celebrate_cd > 0) { crab_state.celebrate_cd--; }
+    else { crab_state.celebrate_fr = 24; crab_state.celebrate_cd = (uint16_t)random(160, 240); }
 
     int ocx = (int)crab_state.x;
-    int ocy = PIT_FLOOR_Y - 8;
+    int ocy = grass_floor_y(ocx) - 8;
     int ox1, oy1, ox2, oy2;
     crab_bbox_at(ocx, ocy, &ox1, &oy1, &ox2, &oy2);
-    // Expand bbox to include pinstripes and order ticket
-    ox1 -= 2; ox2 += 10; oy1 -= 6;
 
     crab_state.x += crab_state.vx;
-    if (crab_state.x < 48.0f) {
-        crab_state.vx = fabsf(crab_state.vx); crab_state.right = true;
-    }
-    if (crab_state.x > (float)(SCR_W - 48)) {
-        crab_state.vx = -fabsf(crab_state.vx); crab_state.right = false;
-    }
+    if (crab_state.x < 48.0f)               { crab_state.vx =  fabsf(crab_state.vx); crab_state.right = true;  }
+    if (crab_state.x > (float)(SCR_W - 48)) { crab_state.vx = -fabsf(crab_state.vx); crab_state.right = false; }
 
     int ncx = (int)crab_state.x;
-    int ncy = PIT_FLOOR_Y - 8;
+    int ncy = grass_floor_y(ncx) - 8;
     int nx1, ny1, nx2, ny2;
     crab_bbox_at(ncx, ncy, &nx1, &ny1, &nx2, &ny2);
-    nx1 -= 2; nx2 += 10; ny1 -= 6;
 
     bg_restore((ox1 < nx1 ? ox1 : nx1), (oy1 < ny1 ? oy1 : ny1),
                (ox2 > nx2 ? ox2 : nx2), (oy2 > ny2 ? oy2 : ny2));
@@ -1514,25 +2265,6 @@ static void pit_timer_cb(lv_timer_t*) {
     draw_crab(anim_canvas, ncx, ncy,
               lv_color_hex(s_anim_bull), lv_color_hex(s_anim_bear),
               crab_state.blinking, crab_state.walk_frame, celebrating);
-    draw_pinstripes(anim_canvas, ncx, ncy);
-
-    // ── ORDER TICKET WOBBLE ───────────────────────────────────────────────────
-    // 6×4 Pearl rect wobbling above right claw tip
-    pit_ticket_tick++;
-    if (pit_ticket_tick >= 4) {
-        pit_ticket_tick = 0;
-        pit_ticket_flip = (pit_ticket_flip == 0) ? 1 : 0;
-    }
-    int tx = ncx + 20;   // right claw tip x offset
-    int ty = ncy - 18 + pit_ticket_flip;
-    if (tx >= 0 && tx + 6 < SCR_W && ty >= 0 && ty + 4 < SCR_H) {
-        lv_draw_rect_dsc_t td;
-        lv_draw_rect_dsc_init(&td);
-        td.radius = 0; td.border_width = 0;
-        td.bg_color = lv_color_hex(0xE6E9EF);
-        td.bg_opa   = LV_OPA_COVER;
-        lv_canvas_draw_rect(anim_canvas, tx, ty, 6, 4, &td);
-    }
 
     lv_obj_invalidate(anim_canvas);
 }
@@ -1754,7 +2486,10 @@ void anim_start(int type, uint32_t secs_to_open) {
         anim_tap_count    = 0;
         anim_last_tap_ms  = 0;
         anim_timer      = lv_timer_create(countdown_tick_cb,  1000, nullptr);
-        cd_crab_timer   = lv_timer_create(countdown_crab_cb,  120,  nullptr);
+        // 160 ms (~6 fps): with full_refresh=1 every frame is a full-screen QSPI
+        // flush, so a slower tick lowers sustained DMA pressure and the rate of the
+        // phase=7 panel hang (see BISECT_LOG.md). 120 ms rebooted ~hourly.
+        cd_crab_timer   = lv_timer_create(countdown_crab_cb,  160,  nullptr);
         return;
     }
 
@@ -1770,13 +2505,34 @@ void anim_start(int type, uint32_t secs_to_open) {
     lv_obj_set_pos(anim_canvas, 0, 0);
 
     switch (type) {
-        case ANIM_STARFIELD:
+        case ANIM_STARFIELD: {
             // No anim_bg needed: star_draw() fills sky + all stars each frame,
             // which is cheap and naturally erases the previous shooting star tail.
             star_init();
             star_draw();
-            anim_timer = lv_timer_create(star_timer_cb, 120, nullptr);
+            // Centered real-time clock + date overlay. Labels are children of
+            // anim_scr, composited on top of the star canvas by LVGL, and freed
+            // when anim_scr is deleted in anim_stop().
+            sf_last_sec  = -1;
+            sf_lbl_clock = lv_label_create(anim_scr);
+            lv_obj_set_style_text_font(sf_lbl_clock, &lv_font_montserrat_48, LV_PART_MAIN);
+            lv_obj_set_style_text_color(sf_lbl_clock, lv_color_hex(0xE6E9EF), LV_PART_MAIN);
+            lv_obj_set_style_bg_color(sf_lbl_clock, lv_color_hex(0x05070F), LV_PART_MAIN);
+            lv_obj_set_style_bg_opa(sf_lbl_clock, LV_OPA_40, LV_PART_MAIN);  // faint backdrop
+            lv_obj_set_style_radius(sf_lbl_clock, 8, LV_PART_MAIN);
+            lv_obj_set_style_pad_all(sf_lbl_clock, 8, LV_PART_MAIN);
+            lv_label_set_text(sf_lbl_clock, "--:--:--");
+            lv_obj_align(sf_lbl_clock, LV_ALIGN_CENTER, 0, -10);
+
+            sf_lbl_date = lv_label_create(anim_scr);
+            lv_obj_set_style_text_font(sf_lbl_date, &lv_font_montserrat_20, LV_PART_MAIN);
+            lv_obj_set_style_text_color(sf_lbl_date, lv_color_hex(0x9AA3B2), LV_PART_MAIN);
+            lv_label_set_text(sf_lbl_date, "---");
+            lv_obj_align_to(sf_lbl_date, sf_lbl_clock, LV_ALIGN_OUT_BOTTOM_MID, 0, 6);
+
+            anim_timer = lv_timer_create(star_timer_cb, 160, nullptr);  // 160 ms: see BISECT_LOG phase=7 note
             break;
+        }
 
         case ANIM_AQUARIUM:
             anim_bg = (lv_color_t*)heap_caps_malloc(
@@ -1786,7 +2542,7 @@ void anim_start(int type, uint32_t secs_to_open) {
             if (anim_bg)
                 memcpy(anim_buf, anim_bg, (size_t)SCR_W * SCR_H * sizeof(lv_color_t));
             aqua_init();
-            anim_timer = lv_timer_create(aqua_timer_cb, 120, nullptr);
+            anim_timer = lv_timer_create(aqua_timer_cb, 160, nullptr);  // 160 ms: see BISECT_LOG phase=7 note
             break;
 
         case ANIM_BEACH:
@@ -1796,7 +2552,7 @@ void anim_start(int type, uint32_t secs_to_open) {
             if (anim_bg)
                 memcpy(anim_buf, anim_bg, (size_t)SCR_W * SCR_H * sizeof(lv_color_t));
             reef_init();
-            anim_timer = lv_timer_create(reef_timer_cb, 120, nullptr);
+            anim_timer = lv_timer_create(reef_timer_cb, 160, nullptr);  // 160 ms: see BISECT_LOG phase=7 note
             break;
 
         case ANIM_PIXELBEACH:
@@ -1806,23 +2562,23 @@ void anim_start(int type, uint32_t secs_to_open) {
             if (anim_bg)
                 memcpy(anim_buf, anim_bg, (size_t)SCR_W * SCR_H * sizeof(lv_color_t));
             pixbeach_init();
-            anim_timer = lv_timer_create(pixbeach_timer_cb, 120, nullptr);
+            anim_timer = lv_timer_create(pixbeach_timer_cb, 160, nullptr);  // 160 ms: see BISECT_LOG phase=7 note
             break;
 
-        case ANIM_MARKETPIT:
+        case ANIM_GRASSLAND:
             anim_bg = (lv_color_t*)heap_caps_malloc(
                 (size_t)SCR_W * SCR_H * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
-            pit_bg_render();
+            grass_bg_render();
             if (anim_bg)
                 memcpy(anim_buf, anim_bg, (size_t)SCR_W * SCR_H * sizeof(lv_color_t));
-            pit_init();
-            anim_timer = lv_timer_create(pit_timer_cb, 120, nullptr);
+            grass_init();
+            anim_timer = lv_timer_create(grass_timer_cb, 160, nullptr);  // 160 ms: see BISECT_LOG phase=7 note
             break;
 
         default:
             star_init();
             star_draw();
-            anim_timer = lv_timer_create(star_timer_cb, 120, nullptr);
+            anim_timer = lv_timer_create(star_timer_cb, 160, nullptr);  // 160 ms: see BISECT_LOG phase=7 note
             break;
     }
 
@@ -1854,7 +2610,10 @@ void anim_stop() {
         if (anim_scr) { lv_obj_del(anim_scr); anim_scr = nullptr; }
         if (anim_buf) { heap_caps_free(anim_buf); anim_buf = nullptr; }
         if (anim_bg)  { heap_caps_free(anim_bg);  anim_bg  = nullptr; }
-        anim_canvas = nullptr;
+        anim_canvas  = nullptr;
+        sf_lbl_clock = nullptr;   // children of anim_scr, already deleted above
+        sf_lbl_date  = nullptr;
+        sf_last_sec  = -1;
     }
     cur_type = -1;
 }

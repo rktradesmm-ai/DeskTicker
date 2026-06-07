@@ -270,7 +270,7 @@ static String build_html(Settings* s) {
     // After-hours animation
     const char* anims[]      = {"0","1","2","3","4","5"};
     const char* anim_names[] = {"Tidepool","Coral Reef","Starfield","Countdown",
-                                 "Pixel Beach","Market Pit"};
+                                 "Pixel Beach","Grassland"};
     html += F("<div class='card'><h2>After-Hours Animation</h2><div class='anim-row'>");
     for (int i = 0; i < 6; i++) {
         bool sel = (s->after_anim == i);
