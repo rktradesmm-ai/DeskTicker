@@ -42,6 +42,10 @@ Live candlestick chart terminal for your desk. WiFi-connected, no subscriptions,
 
 #### Flashing in USB-OTG mode
 
+The **BOOT** and **RST** (reset) buttons used below are on the back of the board:
+
+![Back of the board showing the BOOT and RST (reset) buttons](../Device-reset-boot-buttons.jpg)
+
 In USB-OTG (TinyUSB) mode the board shows up as **two different COM ports**, because the running
 firmware and the bootloader are two separate USB devices that are never present at the same time:
 
