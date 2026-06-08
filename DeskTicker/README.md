@@ -32,6 +32,45 @@ Live candlestick chart terminal for your desk. WiFi-connected, no subscriptions,
 | Partition Scheme | Huge APP (3MB No OTA / 1MB SPIFFS) |
 | CPU Frequency | 240 MHz |
 | Upload Speed | 921600 |
+| **USB Mode** | **USB-OTG (TinyUSB)** |
+| **USB CDC On Boot** | **Enabled** |
+
+> **USB Mode must be "USB-OTG (TinyUSB)"** for the [SD Card Access over USB](#sd-card-access-over-usb)
+> feature to work — the default "Hardware CDC and JTAG" cannot present a USB drive. Keep **USB CDC
+> On Boot = Enabled** so the Serial Monitor keeps working over the same cable. This mode changes how
+> the board flashes — see [Flashing in USB-OTG mode](#flashing-in-usb-otg-mode) below.
+
+#### Flashing in USB-OTG mode
+
+In USB-OTG (TinyUSB) mode the board shows up as **two different COM ports**, because the running
+firmware and the bootloader are two separate USB devices that are never present at the same time:
+
+- **COM5 (example)** — the *running firmware's* serial port (TinyUSB CDC). This is the one the
+  **Serial Monitor** uses, and the only port visible while the device is running normally.
+- **COM3 (example)** — the *bootloader's* serial port. It only appears while the chip is in
+  **download mode**, and it's the one esptool actually **uploads** through.
+
+(The exact numbers depend on your PC — yours may differ. What matters is "the running one" vs "the
+download one.") You upload through the download port and watch logs on the running port. Pick
+**either** way to flash:
+
+**Option A — let the failed attempt flip the board (no buttons):**
+1. Select the running port (e.g. **COM5**) and click **Upload**.
+2. It will error out with something like
+   `ClearCommError failed (PermissionError(13, 'The device does not recognize the command.'))`.
+   **This is expected, not a fault** — the IDE just rebooted the chip into download mode, so the
+   port it was talking to (COM5) vanished and the download port (**COM3**) appeared in its place.
+3. Now select the download port (**COM3**) and click **Upload** again. This one flashes for real.
+
+**Option B — go straight to download mode (one upload, no error):**
+1. Put the board into download mode yourself: hold **BOOT**, tap **RST**, release **BOOT**.
+   The download port (**COM3**) appears immediately.
+2. Select **COM3** and click **Upload** once. No error, no second attempt.
+
+**At the end of every upload:** when esptool prints `Leaving... Hard resetting via RTS pin...` and
+the **screen is blank**, the board often does not restart on its own in this USB mode — **press the
+RST (reset) button once** to reboot into the new firmware. (Just **RST** on its own here — *not* the
+BOOT + RST combo, which is only for entering download mode at the *start* of an upload.)
 
 ### 2. Install Board Support
 
@@ -183,10 +222,58 @@ Triple-tap the chart or after-hours screen to open the **Settings** menu without
 | Asset Cycling | Enable auto-cycle and set the interval (5–120 s); disable for manual swipe only |
 | Brightness | Display brightness 10–100% (adjusts live as you drag) |
 | About / Diagnostics | Free heap, PSRAM, WiFi SSID/RSSI/IP, NTP status, uptime |
+| Share SD over USB | Exposes the micro-SD card to your PC as a USB drive — see [SD Card Access over USB](#sd-card-access-over-usb) |
 | Re-do WiFi Setup | Wipes credentials and returns to the captive-portal setup screen |
 
 **Save & Restart** — writes all changes to NVS and reboots.  
 **Cancel** — discards changes and returns to the chart with no reboot.
+
+---
+
+## SD Card Access over USB
+
+The device has a micro-SD card slot (a 512 MB card is included). The firmware writes a running
+diagnostic log to the card (`deskticker.log`) so it can be tested unattended. **Share SD over USB**
+lets you read and write that card directly from your computer over the USB-C cable — no need to
+pop the card out and use a card reader.
+
+> Requires the firmware to be built with **USB Mode = "USB-OTG (TinyUSB)"** (see
+> [Build Instructions](#1-arduino-ide-settings)). The board's USB-C is wired to the ESP32-S3's
+> native USB, so it appears to Windows as both a serial port **and** a removable drive.
+
+### How to use it
+
+1. Connect the device to your PC with the USB-C cable.
+2. Triple-tap the screen to open **Settings**, then tap **Share SD over USB**.
+3. The screen shows **"SD Shared with PC."** The card now appears as a **removable drive** in
+   Windows File Explorer (and as a disk on macOS/Linux). Copy files off, add files, or delete
+   them — it is a normal read/write drive.
+4. When you're finished, **⚠️ Safely Eject the drive first** (see below), then **tap the screen**.
+   The device restarts and resumes the ticker.
+
+### ⚠️ Always "Safely Eject" before tapping to exit
+
+Because you have full read/write access, Windows may still be finishing writes in the background.
+**Before** you tap the screen to leave share mode:
+
+- **Windows:** click the **"Safely Remove Hardware / Eject"** icon in the system tray (or
+  right-click the drive in File Explorer → **Eject**) and wait for the "safe to remove" message.
+- **macOS:** drag the drive to the Trash / click the **eject** ⏏ icon next to it in Finder.
+
+Skipping this can leave the last files you copied incomplete or corrupt the card's file table.
+Once the drive is ejected, tap the screen — the device reboots and the ticker comes back.
+
+### Good to know
+
+- **One at a time.** While the card is shared with the PC, the ticker is paused and the firmware
+  stops logging to the card — this is deliberate, so the PC is the only thing writing it and the
+  card can never be corrupted by both sides at once.
+- **It will not freeze the device.** USB is a separate system from the display, and nothing new
+  runs while the card is shared.
+- **Returning is a quick reboot.** Tapping to exit restarts the device (a few seconds) and it
+  reconnects automatically.
+- **When *not* sharing,** Windows may show the drive letter as "insert a disk" — that's normal;
+  the card is in use by the ticker until you choose **Share SD over USB**.
 
 ---
 
@@ -212,6 +299,8 @@ DeskTicker/
 ├── animations.h / .cpp    # After-hours animations (tidepool, reef, starfield, countdown, pixel beach, grassland)
 ├── settings_screen.h / .cpp  # On-device settings menu (triple-tap to open)
 ├── tz_options.h / .cpp    # Shared 34-entry timezone table (used by setup portal + settings menu)
+├── sdlog.h / .cpp         # SD-card diagnostic logger (deskticker.log)
+├── usb_msc.h / .cpp       # Share SD over USB — expose the SD card to a PC as a USB drive
 ├── CLAUDE.md              # Architecture notes for AI-assisted development
 │
 │  ── Board support files (from JC3248W535EN DEMO_LVGL) ──

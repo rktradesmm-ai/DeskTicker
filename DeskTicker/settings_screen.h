@@ -7,7 +7,8 @@
 void settings_screen_create(const Settings* initial);
 
 // Call from the main loop (no lock needed).
-// Returns: 0 = user still editing, 1 = user pressed Save, -1 = user pressed Cancel.
+// Returns: 0 = user still editing, 1 = user pressed Save, -1 = user pressed Cancel,
+//          2 = user tapped "Share SD over USB" (enter USB drive mode).
 int settings_screen_poll();
 
 // Copy the user's edited settings out. Call after poll() returns 1.

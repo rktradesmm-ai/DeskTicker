@@ -39,6 +39,7 @@
 #include "animations.h"
 #include "settings_screen.h"
 #include "sdlog.h"           // SD-card mirror of the serial log (overnight testing)
+#include "usb_msc.h"         // "Share SD over USB" — expose the SD card to a PC as a USB drive
 
 // ── Config ────────────────────────────────────────────────────────────────────
 #define LVGL_ROTATION     LV_DISP_ROT_90
@@ -64,7 +65,8 @@ enum State {
     S_CHART,
     S_AFTER_HOURS,
     S_RECONNECT,
-    S_SETTINGS
+    S_SETTINGS,
+    S_USB_SHARE        // SD card shared with PC over USB (ticker paused; reboot to exit)
 };
 
 // ── Reset button state ────────────────────────────────────────────────────────
@@ -109,6 +111,16 @@ static bool        ntp_synced       = false;
 RTC_NOINIT_ATTR static int  rtc_resume_asset_idx = 0;
 RTC_NOINIT_ATTR static int  rtc_resume_tf         = 0;
 RTC_NOINIT_ATTR static bool rtc_resume_valid       = false;
+
+// Set just before a *deliberate* restart that should still resume the last view —
+// ending "Share SD over USB" mode, or "Save & Restart" from the settings menu. Those
+// are clean esp_restart()s, NOT watchdog reboots, so was_wdt_reboot is false and the
+// resume block above would otherwise be skipped — landing on asset 0 instead of the
+// ticker the user was viewing. This magic (checked + cleared once on boot) tells the
+// boot path to honour rtc_resume_* for that one intentional reboot. Its own magic guard
+// rejects cold-power-on garbage, exactly like render_wdt_consume_last_reboot().
+#define RESUME_MAGIC 0x05B5E51DUL
+RTC_NOINIT_ATTR static uint32_t rtc_resume_magic = 0;
 
 // ── LVGL helper macros ────────────────────────────────────────────────────────
 #define LV_LOCK()   bsp_display_lock(2000)  // 2 s timeout — prevents permanent freeze if vendor TE flush stalls
@@ -255,6 +267,60 @@ static void hide_connecting() {
         conn_scr = nullptr;
         conn_lbl = nullptr;
     }
+    LV_UNLOCK();
+}
+
+// ── USB "Share SD over USB" screen ────────────────────────────────────────────
+// Full-screen notice shown while the micro-SD card is exposed to a PC as a USB
+// drive. A single tap anywhere requests exit (the main loop then reboots, which
+// hands the SD card cleanly back to the logger).
+static lv_obj_t*     usb_scr      = nullptr;
+static volatile bool usb_exit_req = false;
+
+static void usb_scr_tap_cb(lv_event_t*) { usb_exit_req = true; }
+
+// ok == true  → card mounted and shared; ok == false → no card found / share failed.
+static void show_usb_share_screen(bool ok) {
+    if (!LV_LOCK()) return;
+    usb_scr = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(usb_scr, lv_color_hex(0x0E1117), LV_PART_MAIN);
+    lv_obj_clear_flag(usb_scr, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t* title = lv_label_create(usb_scr);
+    lv_obj_set_style_text_font(title,  &lv_font_montserrat_22, LV_PART_MAIN);
+    lv_obj_set_style_text_color(title, ok ? lv_color_hex(0x22C55E)
+                                          : lv_color_hex(0xF59E0B), LV_PART_MAIN);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_label_set_text(title, ok ? LV_SYMBOL_USB "  SD Shared with PC"
+                                : LV_SYMBOL_WARNING "  No SD Card");
+    lv_obj_align(title, LV_ALIGN_CENTER, 0, -56);
+
+    lv_obj_t* body = lv_label_create(usb_scr);
+    lv_obj_set_style_text_font(body,  &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_color(body, lv_color_hex(0xE6E9EF), LV_PART_MAIN);
+    lv_obj_set_style_text_align(body, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_label_set_long_mode(body, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(body, SCR_W - 48);
+    if (ok) {
+        lv_label_set_text(body,
+            "The micro-SD card is now a USB drive on your computer.\n\n"
+            "When finished, use \"Safely Remove / Eject\" on the PC,\n"
+            "then tap the screen to resume the ticker (device restarts).");
+    } else {
+        lv_label_set_text(body,
+            "No card was detected, so nothing was shared.\n\n"
+            "Tap the screen to return (device restarts).");
+    }
+    lv_obj_align(body, LV_ALIGN_CENTER, 0, 28);
+
+    // Labels are non-clickable by default, so taps fall through to the screen.
+    lv_obj_add_flag(usb_scr, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(usb_scr, usb_scr_tap_cb, LV_EVENT_CLICKED, NULL);
+
+    if (chart_created) chart_displaced = true;
+    lv_scr_load(usb_scr);
+    cleanup_pending_scr();   // free any screen queued before we got here (e.g. settings)
+    lv_refr_now(NULL);       // paint synchronously while WiFi is idle (race-free)
     LV_UNLOCK();
 }
 
@@ -511,6 +577,12 @@ void setup() {
     // wiped the RTC resume state — this line tells us which.
     sdlog_printf("[boot] reset_reason=%s\n", reset_reason_str());
 
+    // Register the composite USB device (CDC serial + Mass-Storage disk) now that the
+    // SD card geometry is known. The disk starts with NO media — the card stays owned by
+    // the logger until the user picks "Share SD over USB" in settings. No-op (with a
+    // serial note) unless Tools > USB Mode = "USB-OTG (TinyUSB)".
+    usb_msc_init();
+
     // Init display
     bsp_display_cfg_t disp_cfg = {
         .lvgl_port_cfg = ESP_LVGL_PORT_INIT_CONFIG(),
@@ -548,9 +620,15 @@ void setup() {
                   cfg.wifi_ok, cfg.asset_count, cfg.timeframe, cfg.brightness);
     bsp_display_brightness_set(cfg.brightness);
 
-    // After settings are loaded: if this was a watchdog reboot, restore the last-viewed
-    // asset and timeframe so the reboot is invisible to the user.
-    if (was_wdt_reboot && rtc_resume_valid) {
+    // After settings are loaded: restore the last-viewed asset and timeframe so the
+    // reboot is invisible to the user. This fires for two kinds of reboot:
+    //   1. a watchdog reboot (was_wdt_reboot), and
+    //   2. a deliberate restart that asked to resume — ending "Share SD over USB" mode
+    //      or "Save & Restart" from settings (RESUME_MAGIC flag below).
+    // Consume the magic exactly once so a later cold power-on starts at asset 0.
+    bool deliberate_resume = (rtc_resume_magic == RESUME_MAGIC);
+    rtc_resume_magic = 0;
+    if ((was_wdt_reboot || deliberate_resume) && rtc_resume_valid) {
         if (rtc_resume_asset_idx < cfg.asset_count) {
             cur_idx = rtc_resume_asset_idx;
         }
@@ -560,8 +638,8 @@ void setup() {
                 break;
             }
         }
-        sdlog_printf("[WDT] resuming last view: asset_idx=%d tf=%d\n",
-                      cur_idx, cfg.timeframe);
+        sdlog_printf("[%s] resuming last view: asset_idx=%d tf=%d\n",
+                      deliberate_resume ? "resume" : "WDT", cur_idx, cfg.timeframe);
     }
 
     // Kick off WiFi before the splash so the 3 s hold isn't dead time.
@@ -1002,6 +1080,11 @@ void loop() {
             // setting the result, so the user has a visual cue already.
             settings_screen_get(&settings_work);
             settings_save(&settings_work);
+            // Resume the ticker the user was viewing before opening settings, instead of
+            // restarting at asset 0. rtc_resume_* hold that view from the last S_FETCH; the
+            // boot path range-checks the asset index and only restores the timeframe if it
+            // is still enabled, so it stays sensible even if the saved settings changed it.
+            rtc_resume_magic = RESUME_MAGIC;
             sdlog_flush_blocking();
             delay(1500);   // let the on-screen message render
             ESP.restart();
@@ -1027,9 +1110,50 @@ void loop() {
             last_fetch_ms   = 0;
             chart_displaced = false;
             state = S_FETCH;
+
+        } else if (r == 2) {
+            // User tapped "Share SD over USB" — tear down the settings screen and enter
+            // USB drive mode. The settings screen is queued for deletion and freed by
+            // cleanup_pending_scr() once the share screen loads.
+            if (LV_LOCK()) {
+                lv_obj_t* ss = settings_screen_detach();
+                queue_scr_for_delete(ss);
+                LV_UNLOCK();
+            }
+            settings_entered = false;
+            state = S_USB_SHARE;
+
         } else {
             delay(30);   // yield to the LVGL task while user navigates
         }
+        break;
+    }
+
+    // ── USB drive mode: SD card shared with a connected PC ────────────────────
+    case S_USB_SHARE: {
+        static bool usb_entered = false;
+        if (!usb_entered) {
+            // Hand the card to the PC. begin_share() releases it from the logger and
+            // mounts it for raw USB access; false means no card was found.
+            bool ok = usb_msc_begin_share();
+            sdlog_printf("[usb] share %s\n", ok ? "started" : "failed (no card)");
+            show_usb_share_screen(ok);
+            usb_exit_req = false;
+            usb_entered  = true;
+        }
+        // A screen tap ends the session. Reboot is the simplest safe way to return the
+        // SD bus to the logger and rebuild the normal UI.
+        if (usb_exit_req) {
+            usb_msc_end_share();
+            // Mark this as a deliberate restart so the boot path restores the ticker the
+            // user was viewing before sharing (rtc_resume_* still hold it from S_FETCH),
+            // instead of falling back to asset 0.
+            rtc_resume_magic = RESUME_MAGIC;
+            sdlog_println("[usb] share ended — restarting");
+            delay(300);          // let the PC notice the media disappear
+            ESP.restart();
+        }
+        delay(50);
         break;
     }
 

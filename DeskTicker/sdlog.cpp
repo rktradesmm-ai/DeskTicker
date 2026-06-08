@@ -34,6 +34,7 @@ static bool     s_ready    = false;      // card mounted + file usable
 static uint32_t s_file_sz  = 0;          // current size of deskticker.log
 static bool     s_bus_started = false;   // s_sdspi.begin() done once
 static unsigned long s_last_mount_try = 0; // throttle remount attempts while card is out
+static bool     s_suspended = false;     // true after sdlog_release() handed the card to USB MSC
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -219,6 +220,10 @@ static void drain_to_sd() {
 }
 
 void sdlog_flush() {
+    // Suspended: the card has been handed to the USB Mass-Storage driver (share mode).
+    // Do not touch the SD bus at all — the PC owns it now. (Cleared only by a reboot.)
+    if (s_suspended) return;
+
     // Never touch the SD bus while a fetch has the display suspended — that is the exact
     // window we are protecting from bus contention. The FIFO holds the lines until later.
     if (!s_fifo || lvgl_flush_suspended) return;
@@ -249,4 +254,22 @@ void sdlog_flush_blocking() {
         s_ready = true;
     }
     drain_to_sd();
+}
+
+void sdlog_release() {
+    // Persist anything still buffered while the card is still ours.
+    sdlog_flush_blocking();
+
+    // Tear down the SD/FS layer and free the SPI bus so the IDF sdspi driver (USB MSC)
+    // can claim the same pins/host. SD.end() drops the filesystem; s_sdspi.end() releases
+    // the SPI3/HSPI peripheral. Resetting s_bus_started means a future mount would re-begin
+    // the bus — but s_suspended below prevents that until the device reboots.
+    if (s_bus_started) {
+        SD.end();
+        s_sdspi.end();
+        s_bus_started = false;
+    }
+    s_ready     = false;
+    s_suspended = true;   // sdlog_flush() now no-ops until the next boot
+    Serial.println("[sdlog] released SD card to USB Mass-Storage (logging paused)");
 }

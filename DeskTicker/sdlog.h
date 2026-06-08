@@ -41,6 +41,13 @@ void sdlog_flush();
 // concurrently with an in-flight display flush.
 void sdlog_flush_blocking();
 
+// Hand the SD card off to another owner (the USB Mass-Storage "Share SD over USB"
+// feature). Flushes any pending lines, closes the filesystem (SD.end()), frees the
+// SPI bus, and SUSPENDS the logger so sdlog_flush() will not re-mount the card while
+// it is shared. Logging falls back to Serial-only after this. The device reboots when
+// the user leaves share mode, so the logger re-mounts the card cleanly on the next boot.
+void sdlog_release();
+
 // Human-readable name for esp_reset_reason() (POWERON / SW / PANIC / BROWNOUT / ...).
 // Logged at every boot so an unattended reboot's cause is captured on the card.
 const char* reset_reason_str();

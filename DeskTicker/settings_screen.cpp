@@ -538,6 +538,13 @@ static void cancel_cb(lv_event_t*) {
     ss_result = -1;
 }
 
+// ── Share SD over USB callback ────────────────────────────────────────────────
+// Signals the main loop (result code 2) to leave the menu and enter USB drive mode,
+// where the micro-SD card is exposed to a connected PC as a read/write USB drive.
+static void share_sd_cb(lv_event_t*) {
+    ss_result = 2;
+}
+
 // ── WiFi redo callback ────────────────────────────────────────────────────────
 
 static void wifi_redo_cb(lv_event_t*) {
@@ -578,6 +585,9 @@ static void build_main_page() {
 
     r = make_nav_row(page_main, "About / Diagnostics", nullptr);
     lv_obj_add_event_cb(r, go_diag_cb, LV_EVENT_CLICKED, NULL);
+
+    r = make_nav_row(page_main, LV_SYMBOL_USB "  Share SD over USB", nullptr);
+    lv_obj_add_event_cb(r, share_sd_cb, LV_EVENT_CLICKED, NULL);
 
     make_spacer(page_main, 12);
 

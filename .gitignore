@@ -6,6 +6,7 @@ JC3248W535EN/
 
 # Arduino IDE build artifacts (*.cpp.tmp.XXXXX.hash files left in sketch folder)
 LilFishTerminal/*.tmp.*
+DeskTicker/*.tmp.*
 
 # Compiled outputs
 *.bin

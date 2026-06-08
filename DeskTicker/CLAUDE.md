@@ -33,8 +33,10 @@ a candlestick chart on a 3.5" 480×320 IPS touchscreen. No cloud backend, no API
 | `chart_screen.h / .cpp` | LVGL chart screen: header, candle canvas, y-axis canvas, footer |
 | `wifi_manager.h / .cpp` | AP captive-portal setup UI (LVGL screen + HTTP web form); asset picker grouped into Crypto / Stocks & ETFs / Commodities / Forex sections |
 | `animations.h / .cpp` | After-hours fullscreen animations: tidepool, coral reef, starfield (with clock), countdown, pixel beach, grassland |
-| `settings_screen.h / .cpp` | On-device settings menu: assets, TF, TZ, candle colour, anim, cycling, brightness, diagnostics |
+| `settings_screen.h / .cpp` | On-device settings menu: assets, TF, TZ, candle colour, anim, cycling, brightness, diagnostics, Share SD over USB |
 | `tz_options.h / .cpp` | Shared 34-entry timezone table consumed by both `wifi_manager` and `settings_screen` |
+| `sdlog.h / .cpp` | SD-card serial logger (own SPI3/HSPI bus); `sdlog_release()` hands the card to USB MSC |
+| `usb_msc.h / .cpp` | "Share SD over USB" — exposes the micro-SD card to a PC as a USB Mass-Storage drive |
 
 Board support files (`esp_bsp`, `lv_port`, `esp_lcd_*`, `display.h`, `lv_conf.h`) were
 originally copied from the JC3248W535EN demo. `lv_port.c`, `lv_port.h`, `esp_bsp.c`, and
@@ -84,6 +86,9 @@ S_AFTER_HOURS → S_FETCH (re-check every 5 min, swipe, auto-cycle)
 
 S_SETTINGS → S_FETCH (cancel — chart_displaced flag restores the chart)
            → reboot (save)
+           → S_USB_SHARE ("Share SD over USB" tapped)
+
+S_USB_SHARE → reboot (screen tap exits; reboot hands the SD card back to the logger)
 
 S_RECONNECT → S_FETCH (soft reconnect succeeded, chart was visible — chart stays on screen)
             → S_NTP_SYNC (soft reconnect succeeded but NTP was never done)
@@ -283,6 +288,49 @@ minus 17:00–18:00 ET halt (`futures_session_open`) or stale-trade · Stocks/fo
 
 GPIO 0 (labeled **BOOT** on the board, NOT RST). Held LOW for ≥ 3 seconds in `loop()` calls
 `settings_clear()` + `ESP.restart()` → returns to `S_WIFI_SETUP`.
+
+---
+
+## Share SD over USB (USB Mass Storage) — `usb_msc.cpp`
+
+Lets the on-board micro-SD card be read/written directly from a PC over the USB-C cable,
+by presenting it as a USB **Mass-Storage Class (MSC)** drive. Triggered manually from the
+settings menu ("Share SD over USB"); the feature ships enabled.
+
+**REQUIRED build setting (Arduino IDE → Tools):**
+- **USB Mode = "USB-OTG (TinyUSB)"** ← the default "Hardware CDC and JTAG" mode **cannot** do
+  MSC. The board's USB-C is wired to the ESP32-S3 **native USB** (not a CH340/CP2102 bridge),
+  so OTG/TinyUSB works. If left on Hardware CDC/JTAG, the whole `usb_msc.cpp` body compiles to
+  no-op stubs (`#if ARDUINO_USB_MODE == 0`) and the share screen reports "No SD Card".
+- **USB CDC On Boot = "Enabled"** — keeps `Serial` on USB so the serial monitor still works.
+  The device enumerates as a **composite CDC(serial) + MSC(disk)**.
+- After switching USB Mode, the **first** upload may need the manual download mode (hold BOOT,
+  tap RST, release BOOT) because the auto-reset path changes.
+
+**The hard rule — one owner at a time.** MSC gives the PC raw **sector-level** access. The
+firmware's SD logger also writes the card. Two filesystem owners on one medium = corruption.
+So the card is owned by exactly one side at a time:
+- Normal: MSC advertises a removable disk with **no media present**; the logger owns the card.
+  Windows shows a drive letter that says "insert disk" — expected and harmless.
+- Share mode (`S_USB_SHARE`): `sdlog_release()` flushes + `SD.end()`s + frees the SPI3/HSPI bus
+  and suspends the logger, then `usb_msc_begin_share()` re-mounts the card at the raw-sector
+  level via the **IDF `sdspi` driver** and flips MSC media to present. `onRead`/`onWrite` relay
+  whole 512-byte blocks via `sdmmc_read_sectors`/`sdmmc_write_sectors`.
+
+**Geometry is fixed at boot.** `usb_msc_init()` (called in `setup()` right after `sdlog_init()`)
+reads `SD.numSectors()` from the already-mounted card and advertises that to MSC. READ CAPACITY
+can't change after `msc.begin()`, so swapping to a different-size card without rebooting would
+mis-report size. The on-board 512 MB card is fixed, so this is a non-issue in practice.
+
+**Exit = reboot.** A screen tap on the share notice calls `usb_msc_end_share()` (media → absent)
+then `ESP.restart()`. Reboot is the simplest safe hand-back: it fully resets the sdspi host and
+SPI bus, and the logger re-mounts the card on the fresh boot. **The user must "Safely Eject" the
+drive in Windows before tapping**, or the PC's last writes may not flush (R/W mode).
+
+**No new freeze risk.** USB-OTG is a separate peripheral from the QSPI display path that causes
+the documented flush deadlock; in share mode the firmware does no WiFi+QSPI fetch and no SD bus
+I/O of its own, so there is nothing new to contend. The SD bus (CS=10/MOSI=11/SCK=12/MISO=13,
+SPI3/HSPI) is already physically separate from the QSPI display (SPI2).
 
 ---
 
