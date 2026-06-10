@@ -507,3 +507,19 @@ wiping the magic so `render_wdt_consume_last_reboot()` always returned false (no
 **`RTC_NOINIT_ATTR`** (survives a software reset, garbage only on cold power-on, which the
 `WDT_MAGIC` guard rejects). Now a watchdog reboot resumes the same ticker/animation in ~5 s and
 is effectively invisible.
+
+## After-hours soak — PASSED ✅ (2026-06-10)
+
+**Test:** all six after-hours scenes (Tidepool, Coral Reef, Starfield, Countdown, Pixel Beach,
+Grassland) run on core 3.0.7 with the 160 ms per-frame timers, during US-market weekday closed
+hours (SPY/QQQ after-hours).
+
+**Result: 12+ hours, no reset.** No `[WDT] render watchdog` reboot across the whole run. This is
+a marked improvement over the pre-mitigation MTBF (Pixel Beach ~1–2 h, Tidepool ~11 h at 120 ms),
+confirming the 120 ms → 160 ms flush-rate cut (2026-06-07) meaningfully widened the animation hang
+window. If a watchdog reboot ever does occur, the `RTC_NOINIT_ATTR` resume fix brings the same
+ticker/scene back in ~5 s, so it stays effectively invisible.
+
+**Scope/caveat:** these scenes are still subject to the same underlying QSPI/`full_refresh=1`
+`phase=7` hang (it is not eliminated, only made rarer). The watchdog + resume remain the recovery
+path; do not lower the 160 ms timers back toward 120 ms without re-soaking.
