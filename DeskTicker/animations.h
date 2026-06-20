@@ -49,6 +49,7 @@ typedef struct {
     // 7=tx_param CASET command send  (freezeTest2.txt: phase=4 chunk=3)
     uint8_t  phase;        // lvgl_render_phase at the moment of reboot
     uint8_t  chunk;        // lvgl_render_chunk at the moment of reboot
+    uint8_t  source;       // 0 = render-task watchdog, 1 = main-loop watchdog
 } WdtReboot;
 
 // Arm the watchdog + start its feed timer. Call once in setup(), under LV_LOCK,
@@ -66,5 +67,16 @@ uint32_t render_wdt_heartbeat();
 void render_wdt_keepalive();
 
 // If the previous boot ended in a watchdog reboot, copy details to *out, clear the
-// marker, and return true. Call once early in setup().
+// marker, and return true. Call once early in setup(). Covers BOTH the render-task
+// watchdog and the main-loop watchdog below; inspect out->source to tell them apart.
 bool render_wdt_consume_last_reboot(WdtReboot* out);
+
+// ── Main-loop liveness watchdog (separate esp_timer; fed ONLY from loop()) ──────
+// The render watchdog above is fed by the LVGL render task, so it CANNOT detect a
+// hang confined to the main loop — the render task keeps cycling and feeding it
+// (exactly the 2026-06-09 USB-CDC stall freeze). This second watchdog reboots if
+// loop() stops iterating for ~60 s. On reboot it sets the same WdtReboot marker with
+// source=1, so the boot path's resume-last-view logic runs automatically.
+void loop_wdt_init();    // create + arm the 60 s esp_timer; call once from setup()
+void loop_wdt_feed();    // re-arm the countdown; call at the top of loop() (and post-fetch)
+void loop_wdt_pause();   // disarm before an intentional long block (e.g. the WiFi portal)

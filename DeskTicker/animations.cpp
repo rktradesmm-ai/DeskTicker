@@ -54,11 +54,12 @@ static void wdt_fire(void*) {
     // 4=esp_lcd draw — most likely stuck point, 5=flush done, 6=mutex wait).
     s_reboot_mark.phase        = lvgl_render_phase;
     s_reboot_mark.chunk        = lvgl_render_chunk;
+    s_reboot_mark.source       = 0;            // render-task watchdog
     sdlog_printf("[WDT] render watchdog: no frame in 5s, rebooting "
                  "(state=%u phase=%u chunk=%u heap=%u psram=%u hb=%u)\n",
                  s_last_state, s_reboot_mark.phase, s_reboot_mark.chunk,
                  s_reboot_mark.free_heap, s_reboot_mark.free_psram, s_heartbeat);
-    Serial.flush();
+    if (Serial) Serial.flush();   // never block on a disconnected USB-CDC host
     // Persist the reboot-cause line to the SD card before we reset, so an unattended
     // overnight reboot leaves a record even though the next boot's RTC line also reports it.
     sdlog_flush_blocking();
@@ -84,6 +85,62 @@ static void wdt_feed() {
     esp_timer_restart(s_wdt, 5ULL * 1000 * 1000);
 }
 
+// ── Main-loop liveness watchdog ────────────────────────────────────────────────
+// Separate esp_timer fed ONLY from loop() (never by the render task), so it catches a
+// hang confined to the main loop — the failure the render watchdog above cannot see.
+#define LOOP_WDT_US (60ULL * 1000 * 1000)     // 60 s: well above the ~10 s fetch + 2 s LV_LOCK
+static esp_timer_handle_t s_loop_wdt       = nullptr;
+static volatile bool      s_loop_wdt_armed = false;
+
+static void loop_wdt_fire(void*) {
+    // loop() has not run for 60 s — the main loop is wedged (e.g. a stalled USB-CDC
+    // Serial write, an SD I/O stall, or a deadlock). Record it with source=1 so the next
+    // boot reports a MAIN-LOOP reboot and resumes the last view, then reset. Kept minimal
+    // (no blocking SD flush) in case the hang is inside SD I/O — the next boot logs it.
+    s_reboot_mark.magic        = WDT_MAGIC;
+    s_reboot_mark.last_state   = s_last_state;
+    s_reboot_mark.free_heap    = (uint32_t)ESP.getFreeHeap();
+    s_reboot_mark.free_psram   = (uint32_t)ESP.getFreePsram();
+    s_reboot_mark.reboot_epoch = (uint32_t)time(nullptr);
+    s_reboot_mark.phase        = lvgl_render_phase;   // not meaningful for a loop hang, but harmless
+    s_reboot_mark.chunk        = lvgl_render_chunk;
+    s_reboot_mark.source       = 1;            // main-loop watchdog
+    esp_restart();
+}
+
+void loop_wdt_init() {
+    if (s_loop_wdt) return;
+    const esp_timer_create_args_t args = {
+        .callback        = loop_wdt_fire,
+        .arg             = nullptr,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name            = "loop_wdt",
+        .skip_unhandled_events = false
+    };
+    if (esp_timer_create(&args, &s_loop_wdt) == ESP_OK) {
+        esp_timer_start_once(s_loop_wdt, LOOP_WDT_US);
+        s_loop_wdt_armed = true;
+    }
+}
+
+void loop_wdt_feed() {
+    if (!s_loop_wdt) return;
+    // Re-arm (or arm, if paused). esp_timer_restart needs a running timer; if we were
+    // paused for a long block, start it fresh instead.
+    if (s_loop_wdt_armed) {
+        esp_timer_restart(s_loop_wdt, LOOP_WDT_US);
+    } else {
+        esp_timer_start_once(s_loop_wdt, LOOP_WDT_US);
+        s_loop_wdt_armed = true;
+    }
+}
+
+void loop_wdt_pause() {
+    if (!s_loop_wdt || !s_loop_wdt_armed) return;
+    esp_timer_stop(s_loop_wdt);
+    s_loop_wdt_armed = false;
+}
+
 // ── Swipe / gesture state ─────────────────────────────────────────────────────
 static volatile int8_t anim_swipe        = 0;
 static volatile int8_t anim_settings_req = 0;
@@ -99,6 +156,16 @@ static void anim_gesture_cb(lv_event_t*) {
     lv_dir_t dir = lv_indev_get_gesture_dir(indev);
     if      (dir == LV_DIR_LEFT)  anim_swipe =  1;
     else if (dir == LV_DIR_RIGHT) anim_swipe = -1;
+    // DIAGNOSTIC (phantom-swipe hunt, 2026-06-13): mirror chart_gesture_cb — log the
+    // gesture direction + touch point + movement vector so an after-hours phantom swipe
+    // is captured with the same detail. Out-of-range pt / wild vect = controller glitch.
+    lv_point_t p = {0, 0}, v = {0, 0};
+    lv_indev_get_point(indev, &p);
+    lv_indev_get_vect(indev, &v);
+    const char* dname = dir == LV_DIR_LEFT ? "LEFT" : dir == LV_DIR_RIGHT ? "RIGHT"
+                      : dir == LV_DIR_TOP  ? "TOP"  : dir == LV_DIR_BOTTOM ? "BOTTOM" : "?";
+    sdlog_printf("[gesture] anim dir=%s pt=(%d,%d) vect=(%d,%d)\n",
+                 dname, (int)p.x, (int)p.y, (int)v.x, (int)v.y);
     // A swipe cancels any in-progress tap sequence.
     anim_tap_count = 0;
 }

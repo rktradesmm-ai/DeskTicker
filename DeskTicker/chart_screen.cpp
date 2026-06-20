@@ -5,6 +5,7 @@
 #include "chart_screen.h"
 #include "settings.h"
 #include "assets.h"
+#include "sdlog.h"   // diagnostic logging of (possibly phantom) swipe gestures
 
 // ── Color helpers ─────────────────────────────────────────────────────────────
 static lv_color_t rgb32_to_lv(uint32_t rgb) {
@@ -71,6 +72,16 @@ static void chart_gesture_cb(lv_event_t*) {
     else if (dir == LV_DIR_RIGHT)  chart_swipe      = -1;  // prev asset
     else if (dir == LV_DIR_TOP)    chart_swipe_vert =  1;  // next timeframe
     else if (dir == LV_DIR_BOTTOM) chart_swipe_vert = -1;  // prev timeframe
+    // DIAGNOSTIC (phantom-swipe hunt, 2026-06-13): record every gesture with the touch
+    // point and movement vector. A real swipe lands in-bounds (x 0..SCR_W, y 0..SCR_H)
+    // with a sane vect; an out-of-range point or a wild vect flags a controller glitch.
+    lv_point_t p = {0, 0}, v = {0, 0};
+    lv_indev_get_point(indev, &p);
+    lv_indev_get_vect(indev, &v);
+    const char* dname = dir == LV_DIR_LEFT ? "LEFT" : dir == LV_DIR_RIGHT ? "RIGHT"
+                      : dir == LV_DIR_TOP  ? "TOP"  : dir == LV_DIR_BOTTOM ? "BOTTOM" : "?";
+    sdlog_printf("[gesture] chart dir=%s pt=(%d,%d) vect=(%d,%d)\n",
+                 dname, (int)p.x, (int)p.y, (int)v.x, (int)v.y);
     // A swipe cancels any in-progress tap sequence.
     chart_tap_count = 0;
 }

@@ -383,6 +383,25 @@ after-hours only before 2026-05-30). `anim_start`/`anim_stop` no longer touch it
 reboot…`; a `[health]` line every 60 s logs heap/PSRAM/heartbeat. Being always-on, it also
 retires the old "watchdog never runs >5 min" soak-test caveat.
 
+**Main-loop liveness watchdog (separate, 60 s) — `loop_wdt_*` in `animations.cpp`.** The render
+watchdog above is fed by the LVGL render task, so it **cannot detect a hang confined to the main
+loop** — the render task keeps cycling and feeding it. (This is exactly the 2026-06-09 freeze: a
+blocking `Serial`/USB-CDC write wedged `loop()` while LVGL kept running, so the render watchdog
+never fired and the device sat dead ~74 min.) `loop_wdt_init()` arms a second `esp_timer` in
+`setup()`; `loop_wdt_feed()` re-arms it at the **top of `loop()`** and again right after
+`api_fetch()`; `loop_wdt_pause()` disarms it around the blocking WiFi captive portal
+(`wifi_setup_run`). On lapse it sets the **shared `WdtReboot` marker with `source=1`** and
+`esp_restart()`s, so the boot path resumes the last view exactly like a render reboot; the boot log
+prints `[LOOP-WDT]` vs `[WDT]`. **Any new blocking call added to `loop()` (USB, SD, network) must
+stay well under 60 s** or it will trip this watchdog. The render watchdog stays at 5 s.
+
+**USB-OTG mode makes `Serial` blocking — logging must never gate the loop.** With USB Mode =
+USB-OTG (TinyUSB) + CDC-on-boot, `Serial` is the USB-CDC port. If the cable is in a PC but no
+monitor is draining it, a blocking `Serial.print` fills the TX buffer and hangs the main loop.
+Mitigations (do not remove): `Serial.setTxTimeoutMs(0)` in `setup()` (writes drop instead of block),
+and `sdlog_printf()` pushes to the SD FIFO **before** mirroring to Serial and gates every mirror on
+`if (Serial)` (false when no host/DTR). SD logging is the source of truth; Serial is best-effort.
+
 **Display-flush deadlock — ROOT CAUSE FIXED (2026-05-31, final commit `b03bc1c`;
 soak-confirmed PASS 2026-06-06, branch merged to `main`):**
 Root cause: `api_fetch()` was called with LVGL rendering running freely (no mutex,

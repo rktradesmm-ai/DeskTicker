@@ -122,16 +122,16 @@ void sdlog_init() {
     s_fifo = (char*)heap_caps_malloc(FIFO_CAP, MALLOC_CAP_SPIRAM);
     if (!s_fifo) s_fifo = (char*)malloc(FIFO_CAP);
     if (!s_fifo) {
-        Serial.println("[sdlog] FIFO alloc failed — Serial-only logging");
+        if (Serial) Serial.println("[sdlog] FIFO alloc failed — Serial-only logging");
         return;
     }
     s_head = s_tail = 0;
 
     if (sdlog_try_mount()) {
         s_ready = true;
-        Serial.printf("[sdlog] SD ready, %s = %lu bytes\n", SDLOG_PATH, (unsigned long)s_file_sz);
+        if (Serial) Serial.printf("[sdlog] SD ready, %s = %lu bytes\n", SDLOG_PATH, (unsigned long)s_file_sz);
     } else {
-        Serial.println("[sdlog] SD mount failed — Serial-only logging (will retry when inserted)");
+        if (Serial) Serial.println("[sdlog] SD mount failed — Serial-only logging (will retry when inserted)");
         s_ready = false;
     }
 }
@@ -143,17 +143,22 @@ void sdlog_printf(const char* fmt, ...) {
     vsnprintf(body, sizeof(body), fmt, ap);
     va_end(ap);
 
-    // Always mirror to Serial immediately (unchanged on-screen behaviour).
-    Serial.print(body);
-
-    // Queue a timestamped copy for the SD card. Prefix once per call (each call is a
-    // full line in this codebase).
+    // Queue a timestamped copy for the SD card FIRST. The SD log is the real diagnostic
+    // record for unattended soaks, so it must never be starved by a slow/stalled Serial
+    // mirror. Prefix once per call (each call is a full line in this codebase).
     if (s_fifo) {
         char ts[40];
         make_timestamp(ts, sizeof(ts));
         fifo_push_str(ts);
         fifo_push_str(body);
     }
+
+    // Mirror to Serial only when a host is actually reading. In USB-OTG (TinyUSB) mode
+    // `Serial` is the USB-CDC port; if the cable is in a PC but no monitor is draining it,
+    // a blocking write fills the TX buffer and HANGS the main loop (the 2026-06-09 freeze).
+    // `if (Serial)` is false when the host/DTR is absent, so the mirror is simply skipped;
+    // setTxTimeoutMs(0) in setup() makes any attempted write non-blocking as a second guard.
+    if (Serial) Serial.print(body);
 }
 
 void sdlog_println(const char* s) {
@@ -235,7 +240,7 @@ void sdlog_flush() {
             s_last_mount_try = millis();
             if (sdlog_try_mount()) {
                 s_ready = true;
-                Serial.println("[sdlog] SD re-mounted, resuming logging");
+                if (Serial) Serial.println("[sdlog] SD re-mounted, resuming logging");
                 drain_to_sd();   // write everything buffered while the card was out
             }
         }
@@ -271,5 +276,5 @@ void sdlog_release() {
     }
     s_ready     = false;
     s_suspended = true;   // sdlog_flush() now no-ops until the next boot
-    Serial.println("[sdlog] released SD card to USB Mass-Storage (logging paused)");
+    if (Serial) Serial.println("[sdlog] released SD card to USB Mass-Storage (logging paused)");
 }

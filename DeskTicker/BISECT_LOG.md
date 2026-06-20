@@ -523,3 +523,45 @@ ticker/scene back in ~5 s, so it stays effectively invisible.
 **Scope/caveat:** these scenes are still subject to the same underlying QSPI/`full_refresh=1`
 `phase=7` hang (it is not eliminated, only made rarer). The watchdog + resume remain the recovery
 path; do not lower the 160 ms timers back toward 120 ms without re-soaking.
+
+## Live-chart TOTAL freeze, watchdog did NOT fire — main-loop hang in USB-OTG mode — 2026-06-10
+
+**New failure mode, different from every hang above.** First long soak after switching to **USB
+Mode = USB-OTG (TinyUSB)** (required by the new Share-SD-over-USB feature). The live QQQ chart
+froze completely; **the render watchdog never rebooted** the device — it sat dead ~74 min until a
+manual power-cycle.
+
+**Log (`deskticker1.log`):** healthy `[health] state=5` at 23:35:47 (`flushTO=0 teTO=0 lockTO=0
+phase=0`, heartbeat rising) → `[fetch] QQQ: OK` at 23:36:00 → then **silence** (the 60 s `[health]`
+line never printed again) and **no `[WDT]` reboot**. User confirmed: USB plugged into the PC with
+the **serial monitor CLOSED**, screen a **totally static** chart, swipes did nothing.
+
+**Root cause — two layers:**
+1. **Trigger: blocking `Serial` over TinyUSB CDC.** `sdlog_printf()` mirrored every log line to
+   `Serial` (USB-CDC in this mode). With the cable in a PC but **no reader draining the CDC**, the
+   TX buffer fills and the write **blocks the main loop**. This path is byte-identical to the prior
+   12 h+ passing soaks except for the USB-mode switch — the USB change is the regression.
+2. **Why nothing recovered: the render watchdog only watches the RENDER task.** It is an
+   `esp_timer` fed by `render_feed_cb`, a 1 s `lv_timer` running inside the LVGL render task. A
+   hang confined to the **main loop** (not holding `LV_LOCK`) leaves the render task cycling and
+   feeding the dog → it never fires. Static chart + dead swipes = LVGL alive, main loop dead (the
+   swipe sets a flag the dead loop never reads).
+
+**Fix (commit pending):**
+- **Non-blocking Serial:** `Serial.setTxTimeoutMs(0)` in `setup()`; `sdlog_printf()` now pushes to
+  the SD FIFO **before** the Serial mirror and gates every mirror on `if (Serial)` (false when no
+  host/DTR). SD logging is unaffected; a closed/stalled USB host can no longer wedge the loop.
+- **Main-loop liveness watchdog:** a second `esp_timer` (`loop_wdt_*` in `animations.cpp`), 60 s,
+  fed ONLY from the top of `loop()` (and again right after `api_fetch`), paused around the blocking
+  WiFi captive portal. On lapse it sets the shared `WdtReboot` marker with `source=1` and
+  `esp_restart()`s, so the boot path resumes the last view. Boot log distinguishes `[LOOP-WDT]`
+  (main-loop) from `[WDT]` (render). The render watchdog stays at 5 s.
+
+**Key lesson:** the render-task watchdog is NOT a general liveness guarantee — it cannot see a
+main-loop hang. Any new blocking call in `loop()` (USB, SD, network) must be bounded; the loop
+watchdog is the backstop.
+
+**Verification:** re-soak on core 3.0.7, USB-OTG mode, **monitor CLOSED** (the failing condition);
+success = no freeze, `[health]` keeps printing every 60 s. Forced-hang test: a temporary `while(1)`
+in `loop()` must reboot within ~60 s and boot-log `[LOOP-WDT] … resuming last view` on the same
+ticker.

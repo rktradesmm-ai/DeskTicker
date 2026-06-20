@@ -568,6 +568,12 @@ static void show_error(const char* msg) {
 // ── Setup ─────────────────────────────────────────────────────────────────────
 void setup() {
     Serial.begin(115200);
+    // Make Serial writes non-blocking. In USB-OTG (TinyUSB) mode `Serial` is the USB-CDC
+    // port; with the cable in a PC but no monitor draining it, a blocking write fills the
+    // TX buffer and hangs the main loop (root cause of the 2026-06-09 live-chart freeze).
+    // A 0 ms TX timeout makes any write drop instead of blocking. (sdlog also gates each
+    // mirror on `if (Serial)`, so SD logging is unaffected.)
+    Serial.setTxTimeoutMs(0);
     // Mount the SD card first so the boot banner and reset reason are captured on the
     // card for unattended/overnight testing. Falls back to Serial-only if no card.
     sdlog_init();
@@ -598,15 +604,21 @@ void setup() {
     // render task) is up. It protects every screen — including the live chart, which
     // previously had no watchdog at all. Create its feed lv_timer under the LVGL lock.
     if (LV_LOCK()) { render_wdt_init(); LV_UNLOCK(); }
-    // If the previous boot was a watchdog reboot, report it so a chart hang is visible
-    // and its timing measurable on the serial monitor.
+    // Arm the main-loop liveness watchdog too. The render watchdog above only sees the
+    // render task; this one reboots if loop() itself stops iterating (e.g. a USB-CDC or
+    // SD I/O stall). Both share the WdtReboot marker, so either reboot resumes the view.
+    loop_wdt_init();
+    // If the previous boot was a watchdog reboot, report it so a chart/main-loop hang is
+    // visible and its timing measurable. wr.source distinguishes render vs main loop.
     WdtReboot wr;
     bool was_wdt_reboot = render_wdt_consume_last_reboot(&wr);
     if (was_wdt_reboot) {
         // phase: 0=idle  2=TE wait  3=DMA-done wait  4=tx_color pixel DMA (freezeTest2)
         //        5=flush done  6=mutex wait  7=tx_param CASET cmd (new sub-phase)
-        sdlog_printf("[WDT] previous boot ended in a render-watchdog reboot: "
+        sdlog_printf("[%s] previous boot ended in a %s-watchdog reboot: "
                       "state=%u phase=%u chunk=%u freeHeap=%u freePSRAM=%u atEpoch=%lu\n",
+                      wr.source == 1 ? "LOOP-WDT" : "WDT",
+                      wr.source == 1 ? "main-loop" : "render",
                       wr.last_state, wr.phase, wr.chunk,
                       wr.free_heap, wr.free_psram,
                       (unsigned long)wr.reboot_epoch);
@@ -665,6 +677,11 @@ void setup() {
 
 // ── Loop / State machine ──────────────────────────────────────────────────────
 void loop() {
+    // Feed the main-loop watchdog first thing each iteration. If loop() ever stops
+    // iterating for 60 s (a USB-CDC/SD stall or deadlock), this lapses and the device
+    // reboots + resumes the last view — the recovery the render watchdog cannot provide.
+    loop_wdt_feed();
+
     // Flush any queued log lines to the SD card. No-op during a fetch (lvgl_flush_suspended)
     // so SD I/O never adds bus pressure in the WiFi/QSPI-DMA-sensitive window.
     sdlog_flush();
@@ -712,6 +729,10 @@ void loop() {
     // ── First-time WiFi setup ─────────────────────────────────────────────
     case S_WIFI_SETUP:
         sdlog_println("Entering WiFi setup mode");
+        // wifi_setup_run() blocks for the entire captive-portal session (can be minutes)
+        // and never returns to loop() to feed the watchdog. Pause it so it can't false-fire;
+        // the device reboots right after the portal completes anyway.
+        loop_wdt_pause();
         wifi_setup_run(&cfg);   // blocks until saved & restarts flag set
         sdlog_println("Setup done, rebooting");
         sdlog_flush_blocking();
@@ -803,6 +824,7 @@ void loop() {
         lvgl_flush_suspended = true;
         bool ok = api_fetch(&cfg, cur_idx, &asset_data[cur_idx]);
         lvgl_flush_suspended = false;
+        loop_wdt_feed();   // a slow/retried fetch can take >10 s — re-arm so it can't false-fire
         sdlog_printf("[fetch] %s: %s\n", cfg.assets[cur_idx],
                       ok ? "OK" : asset_data[cur_idx].err);
         // Always call hide_connecting — no-op when conn_scr is null, but correctly
@@ -940,7 +962,12 @@ void loop() {
         // Horizontal swipe: cycle assets
         int swipe = chart_screen_get_swipe();
         if (swipe != 0 && cfg.asset_count > 1) {
+            int prev_idx = cur_idx;
             cur_idx = (cur_idx + swipe + cfg.asset_count) % cfg.asset_count;
+            // DIAGNOSTIC (phantom-swipe hunt): tie each asset change to a swipe + direction,
+            // timestamped, so an unexpected switch (e.g. BTC->ES) is unambiguous in the log.
+            sdlog_printf("[swipe] chart %s -> %s dir=%d\n",
+                         cfg.assets[prev_idx], cfg.assets[cur_idx], swipe);
             last_cycle_ms = millis();
             state = S_FETCH;
             break;
@@ -999,7 +1026,11 @@ void loop() {
         // Manual swipe
         int swipe_ah = anim_get_swipe();
         if (swipe_ah != 0 && cfg.asset_count > 1) {
+            int prev_idx = cur_idx;
             cur_idx = (cur_idx + swipe_ah + cfg.asset_count) % cfg.asset_count;
+            // DIAGNOSTIC (phantom-swipe hunt): same as the chart path, for after-hours.
+            sdlog_printf("[swipe] anim %s -> %s dir=%d\n",
+                         cfg.assets[prev_idx], cfg.assets[cur_idx], swipe_ah);
             last_cycle_ms = millis();
             state = S_FETCH;
             break;

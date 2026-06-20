@@ -8,6 +8,47 @@
 #include "api_client.h"
 #include "sdlog.h"   // mirror [YF] logs to the SD card
 
+// Defined in animations.cpp (declared in animations.h). Forward-declared here so the body
+// read can feed the 60 s main-loop watchdog while data is flowing, without pulling the LVGL
+// headers into this translation unit. Safe to call before the watchdog is armed (it no-ops).
+void loop_wdt_feed();
+
+// Read an HTTP response body into `out` with a HARD total-time deadline, feeding the
+// main-loop watchdog as each chunk arrives. HTTPClient::getString() only enforces an
+// inter-byte idle timeout, so a server that trickles the body steadily (seen under US
+// market-open load: a 16 s body read on 2026-06-16) can outlast the 60 s LOOP-WDT and force
+// a reboot. Reading manually lets us (a) feed LOOP-WDT on every chunk so a *progressing*
+// fetch never trips it, and (b) abort cleanly once the total transfer exceeds deadline_ms so
+// a *stuck* fetch fails fast and is retried instead of rebooting. Returns true only if the
+// full declared body (Content-Length) was received before the deadline.
+static bool http_read_body(HTTPClient& http, String& out, uint32_t deadline_ms) {
+    // getStreamPtr() returns a WiFiClient*; hold it as the base Stream* so we don't depend on
+    // the WiFiClient type name being in scope (header chain differs across core versions).
+    Stream* stream = http.getStreamPtr();
+    if (!stream) return false;
+
+    int len = http.getSize();            // Content-Length, or -1 if the server omitted it
+    if (len > 0) out.reserve(len + 1);   // reserve once to avoid repeated String regrow churn
+
+    uint8_t  buf[512];
+    uint32_t start = millis();
+    while (http.connected() || stream->available()) {
+        if (len > 0 && (int)out.length() >= len) break;   // got the whole declared body
+        if (millis() - start > deadline_ms)        break;   // too slow/stuck — give up, retry
+
+        size_t avail = stream->available();
+        if (avail) {
+            size_t n = stream->readBytes(buf, avail > sizeof(buf) ? sizeof(buf) : avail);
+            out.concat((const char*)buf, n);
+            loop_wdt_feed();             // real progress — keep the main-loop watchdog satisfied
+        } else {
+            delay(2);                    // nothing buffered yet — yield to the WiFi/TLS task
+        }
+    }
+    if (len > 0) return (int)out.length() >= len;  // success = received everything promised
+    return out.length() > 0;                       // unknown length: accept any non-empty body
+}
+
 // ══════════════════════════════════════════════════════════════════════════════
 // YAHOO FINANCE  (stocks, ETFs, commodities, forex, crypto — all assets)
 //
@@ -196,11 +237,14 @@ static float fetch_crypto_today_open(const char* host, const char* ticker) {
 
     WiFiClientSecure client;
     client.setInsecure();
+    // Cap the TLS handshake at 10 s (SECONDS) — same reason as yf_try_host: setConnectTimeout
+    // does not bound the secure handshake, so a stall here could otherwise hang past the watchdog.
+    client.setHandshakeTimeout(10);
 
     HTTPClient http;
     http.useHTTP10(true);
     http.setConnectTimeout(10000);
-    http.setTimeout(20000);
+    http.setTimeout(15000);         // 15 s body read (anchor response is tiny)
     if (!http.begin(client, url)) { return 0.0f; }
     http.addHeader("User-Agent",
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -213,7 +257,10 @@ static float fetch_crypto_today_open(const char* host, const char* ticker) {
     int code = http.GET();
     if (code != 200) { http.end(); return 0.0f; }
 
-    String resp = http.getString();
+    // Same bounded, watchdog-feeding read as the main fetch (anchor body is tiny but still
+    // goes through the slow-trickle window during market-open load).
+    String resp;
+    http_read_body(http, resp, 25000);
     http.end();
     if (resp.length() < 20) return 0.0f;
 
@@ -253,11 +300,15 @@ static bool yf_try_host(const char* host, const char* ticker, const char* interv
 
     WiFiClientSecure client;
     client.setInsecure();
+    // Cap the TLS handshake at 10 s (value is in SECONDS). setConnectTimeout below only
+    // bounds the TCP connect, NOT the secure handshake — without this a stalled handshake
+    // can block ~120 s (the core default) and trip the 60 s main-loop watchdog (LOOP-WDT).
+    client.setHandshakeTimeout(10);
 
     HTTPClient http;
     http.useHTTP10(true);           // no chunked transfer-encoding
     http.setConnectTimeout(10000);
-    http.setTimeout(30000);         // 30 s to fully receive body
+    http.setTimeout(15000);         // 15 s to fully receive body (normal body arrives in ~1 s)
 
     if (!http.begin(client, url)) {
         strncpy(out->err, "YF: begin failed", sizeof(out->err));
@@ -283,7 +334,11 @@ static bool yf_try_host(const char* host, const char* ticker, const char* interv
 
     // Read the complete body before parsing — eliminates all streaming edge cases
     // (IncompleteInput / EmptyInput from TLS fragmentation or connection close timing).
-    String resp = http.getString();
+    // Manual read (not getString) so the body transfer is bounded to 25 s total and the
+    // main-loop watchdog is fed while data flows (see http_read_body above). A short read
+    // is caught by the length/JSON checks below and falls through to the fallback host.
+    String resp;
+    http_read_body(http, resp, 25000);
     http.end();
 
     if (resp.length() < 20) {
@@ -541,6 +596,7 @@ static bool api_fetch_yahoo(const Settings* s, const AssetDef* def, AssetData* o
             strncmp(out->err, "YF: 0 candles", 13) == 0) {
             sdlog_printf("[YF] %s: primary failed (%s), trying fallback\n",
                           def->yahoo, out->err);
+            loop_wdt_feed();   // primary may have used ~half the 60 s budget; reset before fallback
             ok = yf_try_host(YF_HOST_FALLBACK, def->yahoo, interval, p1, s->timeframe, def->market, out);
         }
     }
