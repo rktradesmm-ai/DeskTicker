@@ -440,6 +440,11 @@ static bool is_after_hours(int idx) {
 
     AssetData* d = &asset_data[idx];
 
+    // A failed/empty fetch carries no market-state info. Never report after-hours
+    // (which would bounce S_CHART back into S_FETCH before input is read, trapping the
+    // user on a bad ticker). Stay on the chart so swipe / triple-tap stay responsive.
+    if (!d->valid) return false;
+
     // Compute US Eastern wall-clock time for local session math.
     // NYSE/CME/FX sessions are all anchored to ET, independent of the user's tz_offset.
     int wday = -1, mins = -1;
@@ -841,7 +846,19 @@ void loop() {
             if (bg_refresh) {
                 if (LV_LOCK()) { chart_screen_set_status(asset_data[cur_idx].err); LV_UNLOCK(); }
             } else {
-                show_error(asset_data[cur_idx].err);
+                // First view is a failing ticker (no chart yet): build the chart anyway
+                // — it renders "No data" — so S_CHART can service swipes / triple-tap.
+                // Otherwise the user is trapped on the gesture-less "Fetching…" screen
+                // (e.g. an invalid custom symbol that returns HTTP 400). Mirrors the
+                // success-path build at the bottom of S_FETCH.
+                if (LV_LOCK()) {
+                    chart_screen_create(&cfg);
+                    cleanup_pending_scr();   // chart now active; free the queued conn_scr
+                    chart_screen_set_status(asset_data[cur_idx].err);
+                    chart_screen_update(&asset_data[cur_idx], &cfg, wifi_is_connected());
+                    LV_UNLOCK();
+                }
+                chart_created = true;
             }
             if (strncmp(asset_data[cur_idx].err, "YF HTTP -1", 10) == 0) {
                 // Both primary and fallback failed at TCP level — WiFi stack is stale

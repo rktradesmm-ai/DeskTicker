@@ -127,11 +127,44 @@ static String build_html(Settings* s) {
         ".note{color:#8b949e;font-size:.8rem}"
         ".asset-group-label{color:#8b949e;font-size:.75rem;text-transform:uppercase;"
         "letter-spacing:.06em;margin:10px 0 4px}"
+        ".custom-row{display:flex;gap:6px;align-items:center;margin-top:6px}"
+        ".custom-row .casym{flex:1;width:auto;margin-top:0}"
+        ".custom-row .cact{white-space:nowrap;color:#cdd9e5;font-size:.85rem}"
+        ".custom-row .cact input{width:auto;margin:0 4px 0 0}"
+        ".cdel{background:#30363d;color:#cdd9e5;border:none;border-radius:6px;"
+        "padding:8px 10px;cursor:pointer}"
+        ".addbtn{background:#21262d;color:#22c55e;border:1px solid #30363d;"
+        "border-radius:6px;padding:8px;width:100%;cursor:pointer;margin-top:6px}"
         "</style>"
         "<script>"
+        // Total active assets = checked built-ins + custom rows ticked "show" with a symbol.
+        "function aTotal(){"
+        "var a=document.querySelectorAll('.asset-cb:checked').length;"
+        "var c=0,r=document.querySelectorAll('.custom-row');"
+        "for(var i=0;i<r.length;i++){"
+        "var t=r[i].querySelector('.casym').value.trim();"
+        "if(t&&r[i].querySelector('.cact-cb').checked)c++;}"
+        "return a+c;}"
+        "function updCount(){"
+        "document.getElementById('asset-count').textContent='('+aTotal()+'/6)';}"
         "function checkMax(cb){"
-        "var b=document.querySelectorAll('.asset-cb:checked');"
-        "if(b.length>6){cb.checked=false;alert('Max 6 assets!');}}"
+        "if(aTotal()>6){cb.checked=false;alert('Max 6 active assets!');}"
+        "updCount();}"
+        // Append a custom-ticker row (symbol input + "show" checkbox + delete).
+        "function addCustom(sym,act){"
+        "if(document.querySelectorAll('.custom-row').length>=6){alert('Max 6 custom tickers!');return;}"
+        "var d=document.createElement('div');d.className='custom-row';"
+        "d.innerHTML=\"<input class='casym' type='text' name='custom' maxlength='9' placeholder='e.g. PLTR' value='\"+sym+\"' oninput='this.value=this.value.toUpperCase();updCount()'>\"+"
+        "\"<label class='cact'><input class='cact-cb' type='checkbox' name='casset'\"+(act?' checked':'')+\" onchange='checkMax(this)'> show</label>\"+"
+        "\"<button type='button' class='cdel' onclick='delCustom(this)'>&times;</button>\";"
+        "document.getElementById('customs').appendChild(d);updCount();}"
+        "function delCustom(b){b.parentNode.remove();updCount();}"
+        // On submit, copy each row's symbol into its checkbox value so ticked rows POST casset=SYMBOL.
+        "function syncCustoms(){"
+        "var r=document.querySelectorAll('.custom-row');"
+        "for(var i=0;i<r.length;i++){"
+        "r[i].querySelector('.cact-cb').value=r[i].querySelector('.casym').value.trim().toUpperCase();}"
+        "return true;}"
         "function checkTF(cb){"
         "var b=document.querySelectorAll('.tf-cb:checked');"
         "if(b.length==0){cb.checked=true;alert('Select at least one timeframe!');}}"
@@ -143,7 +176,7 @@ static String build_html(Settings* s) {
         "</script>"
         "</head><body>"
         "<h1>DeskTicker Setup</h1>"
-        "<form method='POST' action='/save'>"
+        "<form method='POST' action='/save' onsubmit='return syncCustoms()'>"
     );
 
     // WiFi
@@ -165,7 +198,7 @@ static String build_html(Settings* s) {
         { MARKET_COMMODITY, "Commodities"   },
         { MARKET_FOREX,     "Forex"         },
     };
-    html += F("<div class='card'><h2>Assets <span class='note'>(pick up to 6)</span></h2>");
+    html += F("<div class='card'><h2>Assets <span id='asset-count' class='note'>(0/6)</span></h2>");
     for (int g = 0; g < 4; g++) {
         html += "<p class='asset-group-label'>";
         html += groups[g].label;
@@ -188,13 +221,25 @@ static String build_html(Settings* s) {
         }
         html += F("</div>");
     }
-    // Custom ticker — a free-text Yahoo symbol. The setup AP has no internet, so it
-    // can't be validated here; the device checks/classifies it on first connect.
-    html += F("<p class='asset-group-label'>Custom</p>"
-              "<input type='text' name='custom' maxlength='9' "
-              "placeholder='Add any Yahoo symbol, e.g. PLTR' "
-              "oninput='this.value=this.value.toUpperCase()'>"
-              "<p class='note'>Checked automatically the first time it loads.</p>");
+    // Custom tickers — a JS-managed list: add up to 6, delete, tick "show" to display.
+    // The setup AP has no internet, so symbols can't be validated here; the device
+    // checks/classifies each one the first time it loads after connecting.
+    html += F("<p class='asset-group-label'>Custom tickers</p>"
+              "<div id='customs'></div>"
+              "<button type='button' class='addbtn' onclick=\"addCustom('',false)\">+ Add custom ticker</button>"
+              "<p class='note'>Any Yahoo Finance symbol (e.g. PLTR, SOL-USD). Tick \"show\" to display it. "
+              "Validated automatically the first time it loads.</p>");
+    // Pre-fill any custom tickers already stored (normally none during first-time setup).
+    for (int i = 0; i < custom_count(); i++) {
+        const AssetDef* cd = custom_get(i);
+        if (!cd) continue;
+        bool act = false;
+        for (int j = 0; j < s->asset_count; j++)
+            if (strcmp(s->assets[j], cd->symbol) == 0) { act = true; break; }
+        html += "<script>addCustom('";
+        html += cd->symbol;
+        html += act ? "',true)</script>" : "',false)</script>";
+    }
     html += F("</div>");
 
     // Timeframe — checkboxes, at least one required, swipe up/down to cycle on device
@@ -290,7 +335,7 @@ static String build_html(Settings* s) {
     html += F("</div></div>");
 
     html += F("<button class='btn' type='submit'>Save &amp; Start</button>"
-              "</form></body></html>");
+              "</form><script>updCount();</script></body></html>");
     return html;
 }
 
@@ -322,38 +367,52 @@ static void handle_save() {
             s->asset_count++;
         }
     }
+    // Custom tickers (optional, up to MAX_CUSTOM). No internet in setup AP mode, so we
+    // can't validate against Yahoo here — store each provisionally as a generic 24/7
+    // stock (small fetch window) and let the device auto-classify it on first connect.
+    for (int i = 0; i < server.args(); i++) {
+        if (server.argName(i) != "custom") continue;
+        char sym[ASSET_SYM_LEN];
+        strncpy(sym, server.arg(i).c_str(), sizeof(sym) - 1);
+        sym[sizeof(sym) - 1] = '\0';
+        symbol_normalize(sym);
+        if (!sym[0] || symbol_is_builtin(sym) || custom_index(sym) >= 0 || custom_is_full())
+            continue;
+        AssetDef d;
+        memset(&d, 0, sizeof(d));
+        strncpy(d.symbol, sym, sizeof(d.symbol) - 1);
+        strncpy(d.yahoo,  sym, sizeof(d.yahoo)  - 1);
+        strncpy(d.name,   sym, sizeof(d.name)   - 1);
+        d.market     = MARKET_STOCK;
+        d.decimals   = 2;
+        d.continuous = 1;   // 24/7-sized fetch window until classified
+        custom_add(&d, true);
+    }
+    custom_save_to_nvs();
+
+    // Active custom selections (rows ticked "show"): append to the live list after the
+    // built-in assets, until the shared MAX_ASSETS cap is reached.
+    for (int i = 0; i < server.args(); i++) {
+        if (server.argName(i) != "casset") continue;
+        if (s->asset_count >= MAX_ASSETS) break;
+        char sym[ASSET_SYM_LEN];
+        strncpy(sym, server.arg(i).c_str(), sizeof(sym) - 1);
+        sym[sizeof(sym) - 1] = '\0';
+        symbol_normalize(sym);
+        if (!sym[0] || custom_index(sym) < 0) continue;   // only known custom symbols
+        bool present = false;
+        for (int j = 0; j < s->asset_count; j++)
+            if (strcmp(s->assets[j], sym) == 0) { present = true; break; }
+        if (present) continue;
+        strncpy(s->assets[s->asset_count], sym, ASSET_SYM_LEN - 1);
+        s->assets[s->asset_count][ASSET_SYM_LEN - 1] = '\0';
+        s->asset_count++;
+    }
+
+    // Fall back to a default only if nothing (built-in or custom) was selected.
     if (s->asset_count == 0) {
         strncpy(s->assets[0], "SPY", ASSET_SYM_LEN - 1);
         s->asset_count = 1;
-    }
-
-    // Custom ticker (optional). No internet in setup AP mode, so we can't validate
-    // against Yahoo here — store it provisionally as a generic 24/7 stock so the
-    // fetch window stays small, and let the device auto-classify it on first connect.
-    if (server.hasArg("custom")) {
-        char sym[ASSET_SYM_LEN];
-        strncpy(sym, server.arg("custom").c_str(), sizeof(sym) - 1);
-        sym[sizeof(sym) - 1] = '\0';
-        symbol_normalize(sym);
-        if (sym[0] && !symbol_is_builtin(sym) &&
-            custom_index(sym) < 0 && !custom_is_full()) {
-            AssetDef d;
-            memset(&d, 0, sizeof(d));
-            strncpy(d.symbol, sym, sizeof(d.symbol) - 1);
-            strncpy(d.yahoo,  sym, sizeof(d.yahoo)  - 1);
-            strncpy(d.name,   sym, sizeof(d.name)   - 1);
-            d.market     = MARKET_STOCK;
-            d.decimals   = 2;
-            d.continuous = 1;   // 24/7-sized fetch window until classified
-            if (custom_add(&d, true)) {
-                custom_save_to_nvs();
-                if (s->asset_count < MAX_ASSETS) {
-                    strncpy(s->assets[s->asset_count], sym, ASSET_SYM_LEN - 1);
-                    s->assets[s->asset_count][ASSET_SYM_LEN - 1] = '\0';
-                    s->asset_count++;
-                }
-            }
-        }
     }
 
     // Timeframe — collect all checked values (checkboxes)
