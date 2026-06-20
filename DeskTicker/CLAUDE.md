@@ -359,9 +359,10 @@ canvas scene bakes its static art once into `anim_bg` (zero per-frame cost) and 
 erases moving sprites via `bg_restore()` then redraws them, so nothing ghosts. Starfield is the
 exception (full-canvas repaint each frame; its clock is a pair of LVGL labels on `anim_scr`).
 
-All scenes share `anim_scr` + `anim_canvas` (PSRAM) driven by `lv_timer_create()` at 120 ms.
+All scenes share `anim_scr` + `anim_canvas` (PSRAM) driven by `lv_timer_create()` at 200 ms
+(see the `phase=7` note below for why this rate, not 120/160 ms).
 Countdown (`ANIM_COUNTDOWN`) additionally uses `cd_crab_canvas` (480×50 PSRAM strip) + a
-separate `cd_crab_timer` at 120 ms for the crab walk layer.
+separate `cd_crab_timer` at 200 ms for the crab walk layer.
 `anim_stop()` deletes all timers first, then the screen(s) / frees PSRAM buffers.
 
 Crab claw colors follow `s_anim_bull` / `s_anim_bear` globals (set via `anim_set_candle_colors()`
@@ -449,8 +450,11 @@ Core stays **3.0.7**; `full_refresh` stays 1. See `BISECT_LOG.md` 2026-05-31 ent
 *fetch* race, but the animations also hit the same QSPI hang on their own. With `full_refresh=1`
 locked, every animation frame is a full-screen QSPI flush; at the old 120 ms tick that is ~8
 full-screen flushes/sec — ~8× the chart's load — so the rare `phase=7` hang reboots ~hourly.
-Mitigation: all per-frame animation timers in `anim_start()` are **160 ms** (~6 fps), not 120 ms,
-to cut sustained QSPI flush pressure. Do not lower them back toward 120 ms without re-soaking.
+Mitigation: all per-frame animation timers in `anim_start()` are **200 ms** (~5 fps), not 120 ms,
+to cut sustained QSPI flush pressure. (120 ms rebooted ~hourly; 160 ms still hit `phase=7` once on
+2026-06-20 during the SPY animation, so the rate was lowered again to 200 ms.) The render watchdog
+catches any residual `phase=7` hang and resumes the last view. Do not lower them back toward 120 ms
+without re-soaking.
 
 **RTC resume markers MUST be `RTC_NOINIT_ATTR`, not `RTC_DATA_ATTR`:** `s_reboot_mark`
 (`animations.cpp`) and `rtc_resume_asset_idx/tf/valid` (`DeskTicker.ino`) must survive

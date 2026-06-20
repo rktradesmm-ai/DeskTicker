@@ -2553,10 +2553,11 @@ void anim_start(int type, uint32_t secs_to_open) {
         anim_tap_count    = 0;
         anim_last_tap_ms  = 0;
         anim_timer      = lv_timer_create(countdown_tick_cb,  1000, nullptr);
-        // 160 ms (~6 fps): with full_refresh=1 every frame is a full-screen QSPI
+        // 200 ms (~5 fps): with full_refresh=1 every frame is a full-screen QSPI
         // flush, so a slower tick lowers sustained DMA pressure and the rate of the
-        // phase=7 panel hang (see BISECT_LOG.md). 120 ms rebooted ~hourly.
-        cd_crab_timer   = lv_timer_create(countdown_crab_cb,  160,  nullptr);
+        // phase=7 panel hang (see BISECT_LOG.md). 120 ms rebooted ~hourly; 160 ms still
+        // hit phase=7 (2026-06-20, SPY animation); 200 ms cuts the flush rate further.
+        cd_crab_timer   = lv_timer_create(countdown_crab_cb,  200,  nullptr);
         return;
     }
 
@@ -2597,7 +2598,7 @@ void anim_start(int type, uint32_t secs_to_open) {
             lv_label_set_text(sf_lbl_date, "---");
             lv_obj_align_to(sf_lbl_date, sf_lbl_clock, LV_ALIGN_OUT_BOTTOM_MID, 0, 6);
 
-            anim_timer = lv_timer_create(star_timer_cb, 160, nullptr);  // 160 ms: see BISECT_LOG phase=7 note
+            anim_timer = lv_timer_create(star_timer_cb, 200, nullptr);  // 200 ms: see BISECT_LOG phase=7 note
             break;
         }
 
@@ -2609,7 +2610,7 @@ void anim_start(int type, uint32_t secs_to_open) {
             if (anim_bg)
                 memcpy(anim_buf, anim_bg, (size_t)SCR_W * SCR_H * sizeof(lv_color_t));
             aqua_init();
-            anim_timer = lv_timer_create(aqua_timer_cb, 160, nullptr);  // 160 ms: see BISECT_LOG phase=7 note
+            anim_timer = lv_timer_create(aqua_timer_cb, 200, nullptr);  // 200 ms: see BISECT_LOG phase=7 note
             break;
 
         case ANIM_BEACH:
@@ -2619,7 +2620,7 @@ void anim_start(int type, uint32_t secs_to_open) {
             if (anim_bg)
                 memcpy(anim_buf, anim_bg, (size_t)SCR_W * SCR_H * sizeof(lv_color_t));
             reef_init();
-            anim_timer = lv_timer_create(reef_timer_cb, 160, nullptr);  // 160 ms: see BISECT_LOG phase=7 note
+            anim_timer = lv_timer_create(reef_timer_cb, 200, nullptr);  // 200 ms: see BISECT_LOG phase=7 note
             break;
 
         case ANIM_PIXELBEACH:
@@ -2629,7 +2630,7 @@ void anim_start(int type, uint32_t secs_to_open) {
             if (anim_bg)
                 memcpy(anim_buf, anim_bg, (size_t)SCR_W * SCR_H * sizeof(lv_color_t));
             pixbeach_init();
-            anim_timer = lv_timer_create(pixbeach_timer_cb, 160, nullptr);  // 160 ms: see BISECT_LOG phase=7 note
+            anim_timer = lv_timer_create(pixbeach_timer_cb, 200, nullptr);  // 200 ms: see BISECT_LOG phase=7 note
             break;
 
         case ANIM_GRASSLAND:
@@ -2639,13 +2640,13 @@ void anim_start(int type, uint32_t secs_to_open) {
             if (anim_bg)
                 memcpy(anim_buf, anim_bg, (size_t)SCR_W * SCR_H * sizeof(lv_color_t));
             grass_init();
-            anim_timer = lv_timer_create(grass_timer_cb, 160, nullptr);  // 160 ms: see BISECT_LOG phase=7 note
+            anim_timer = lv_timer_create(grass_timer_cb, 200, nullptr);  // 200 ms: see BISECT_LOG phase=7 note
             break;
 
         default:
             star_init();
             star_draw();
-            anim_timer = lv_timer_create(star_timer_cb, 160, nullptr);  // 160 ms: see BISECT_LOG phase=7 note
+            anim_timer = lv_timer_create(star_timer_cb, 200, nullptr);  // 200 ms: see BISECT_LOG phase=7 note
             break;
     }
 

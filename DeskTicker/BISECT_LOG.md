@@ -565,3 +565,37 @@ watchdog is the backstop.
 success = no freeze, `[health]` keeps printing every 60 s. Forced-hang test: a temporary `while(1)`
 in `loop()` must reboot within ~60 s and boot-log `[LOOP-WDT] … resuming last view` on the same
 ticker.
+
+## After-hours `phase=7` recurred at 160 ms — animation tick lowered to 200 ms — 2026-06-20
+
+**Context.** After the slow-fetch fix (commit `12d292e`: `http_read_body` total-time deadline +
+watchdog feeding + TLS handshake cap) the BTC live chart ran several days with **no freeze or
+reboot** — the every-1-2 h `[LOOP-WDT]` fetch-hang reboots are gone. With the chart finally stable,
+the device ran the **after-hours animation** for long uninterrupted stretches and surfaced a
+separate, pre-existing failure: the `phase=7` QSPI/tearing-effect panel hang.
+
+**Log (`DeskTicker.log`):** SPY after-hours animation (`state=6`), healthy for ~4 min
+(`[health] … phase=0`, `renderHB` climbing +60/min), then:
+```
+10:36:28 [health] state=6 … phase=4 chunk=5      ← mid-flush, normal
+10:37:28 [WDT] render watchdog: no frame in 5s, rebooting (state=6 phase=7 chunk=4 …)
+```
+The **render watchdog (5 s) caught it and auto-resumed** the last view (`asset_idx=2 tf=15`); the
+device kept running SPY fine afterwards. This is the documented `phase=7` class (see the 2026-06-07
+entry), **not** caused by the fetch fix — `phase=7` is in the precompiled QSPI flush path, below
+LVGL, in the render task; the fetch changes only touch `S_FETCH` and gesture logging.
+
+**Why it appeared now, not before.** Pre-fix, the chart rebooted every 1–2 h, so the animation was
+rarely left running long enough to hit its own (rarer) `phase=7`. A stable chart simply exposed it.
+
+**Mitigation applied.** Lowered every per-frame animation timer in `anim_start()` from **160 ms →
+200 ms** (~5 fps): Starfield, Tidepool (`aqua`), Coral Reef (`reef`), Pixel Beach, Grassland, the
+default fallback, and the Countdown crab strip (`cd_crab_timer`). History of this lever: 120 ms
+rebooted ~hourly → 160 ms (2026-06-07) → 160 ms still hit `phase=7` once here → 200 ms. The root
+cause is unfixable at the app level (it lives in the precompiled SPI driver and `full_refresh=1` is
+locked); the render watchdog remains the accepted backstop for any residual hang. Do not raise the
+frame rate back toward 120/160 ms without re-soaking.
+
+**Verification.** Re-soak core 3.0.7 on an after-hours animation (closed-market stock, e.g. SPY)
+for many hours; success = far fewer (ideally zero) `[WDT] … phase=7` reboots, and any that do occur
+still auto-resume the last view. Animations should look marginally slower but smooth.
