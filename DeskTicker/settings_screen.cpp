@@ -746,7 +746,7 @@ static void share_sd_cb(lv_event_t*) {
 // ── WiFi redo callback ────────────────────────────────────────────────────────
 
 static void wifi_redo_cb(lv_event_t*) {
-    // Same action as holding the BOOT button 3 seconds
+    // Same action as holding the BOOT button 6 seconds
     settings_clear();
     delay(200);
     ESP.restart();

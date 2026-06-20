@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DeskTicker — Firmware Updater</title>
+
+  <!-- ESP Web Tools: provides the <esp-web-install-button> that flashes the
+       device over USB (WebSerial) straight from the browser. Chrome/Edge only. -->
+  <script type="module"
+          src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js"></script>
+
+  <style>
+    /* DeskTicker brand colours */
+    :root {
+      --bull:  #22C55E;   /* green  */
+      --bear:  #EF4444;   /* red    */
+      --bg:    #0B0F14;   /* near-black background */
+      --card:  #131A22;
+      --text:  #E6EDF3;
+      --muted: #9AA7B4;
+      --line:  #243240;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.55;
+    }
+    .wrap { max-width: 720px; margin: 0 auto; padding: 32px 20px 80px; }
+
+    header { text-align: center; margin-bottom: 28px; }
+    .word { font-size: 40px; font-weight: 800; letter-spacing: -0.5px; }
+    .word .d { color: var(--bull); }
+    .word .t { color: var(--bear); }
+    .tag { color: var(--muted); margin-top: 4px; font-size: 15px; }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 22px 24px;
+      margin: 18px 0;
+    }
+    h2 { font-size: 18px; margin: 0 0 12px; }
+
+    ol { margin: 0; padding-left: 22px; }
+    ol li { margin: 8px 0; }
+    .kbd {
+      display: inline-block;
+      background: #1d2731;
+      border: 1px solid var(--line);
+      border-bottom-width: 2px;
+      border-radius: 6px;
+      padding: 1px 7px;
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    .install-row { text-align: center; margin: 26px 0 6px; }
+    esp-web-install-button {
+      --esp-tools-button-color: #0B0F14;
+      --esp-tools-button-text-color: #ffffff;
+    }
+    /* Fallback styling for the button slot */
+    .btn {
+      display: inline-block;
+      background: var(--bull);
+      color: #07120b;
+      font-weight: 700;
+      font-size: 16px;
+      padding: 12px 26px;
+      border-radius: 10px;
+      border: none;
+      cursor: pointer;
+    }
+    .unsupported {
+      display: none;
+      color: var(--bear);
+      font-weight: 600;
+      margin-top: 10px;
+    }
+
+    .note { color: var(--muted); font-size: 14px; }
+    .warn { color: var(--bear); font-weight: 600; }
+    .ok   { color: var(--bull); font-weight: 600; }
+    a { color: var(--bull); }
+    code { background: #1d2731; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+    footer { text-align: center; color: var(--muted); font-size: 13px; margin-top: 40px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div class="word"><span class="d">Desk</span>Ticker</div>
+      <div class="tag">Firmware Updater</div>
+    </header>
+
+    <div class="card">
+      <h2>Update your DeskTicker</h2>
+      <p class="note">
+        This flashes the latest firmware straight from your browser — no Arduino
+        IDE, no drivers to install. It takes about a minute.
+      </p>
+      <ol>
+        <li>Use <strong>Google Chrome</strong> or <strong>Microsoft Edge</strong>
+            on a computer (this does <em>not</em> work on phones, Firefox or Safari).</li>
+        <li>Plug the DeskTicker into your computer with the <strong>USB-C cable</strong>.</li>
+        <li><strong>Put it in update mode:</strong> press and <span class="kbd">HOLD BOOT</span>,
+            briefly tap <span class="kbd">RST</span>, then release <span class="kbd">BOOT</span>.
+            <span class="note">(The two small buttons on the back of the device.)</span></li>
+        <li>Click <strong>Install</strong> below and pick the new serial port that appears.</li>
+        <li>To <span class="ok">keep your settings</span> (Wi-Fi, tickers, theme),
+            leave the <em>“Erase device”</em> box <strong>unchecked</strong>.
+            Tick it only for a clean reset / recovery.</li>
+        <li>When it finishes, press <span class="kbd">RST</span> once to start the new firmware.</li>
+      </ol>
+
+      <div class="install-row">
+        <esp-web-install-button manifest="./manifest.json">
+          <button slot="activate" class="btn">⬇ Install / Update</button>
+          <span slot="unsupported" class="unsupported" style="display:inline">
+            ⚠ Your browser can’t flash devices. Please use Chrome or Edge on a desktop.
+          </span>
+          <span slot="not-allowed" class="unsupported" style="display:inline">
+            ⚠ This page must be opened over <code>https</code> (or localhost).
+          </span>
+        </esp-web-install-button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Having trouble?</h2>
+      <ol>
+        <li><strong>No port appears, or it fails to connect:</strong> the device
+            wasn’t in update mode. Redo step 3 (HOLD BOOT → tap RST → release BOOT),
+            then click Install again.</li>
+        <li><strong>“Erase device” warning:</strong> erasing wipes your Wi-Fi and
+            settings — you’ll redo the quick on-screen setup afterward. Skip it for
+            a normal update.</li>
+        <li><strong>Wrong browser:</strong> only Chrome and Edge on a desktop/laptop
+            can flash over USB.</li>
+        <li><strong>Need a clean start without a computer?</strong> On the device,
+            triple-tap the screen → <em>Settings</em> → <em>“Re-do Wi-Fi Setup”</em>.
+            (Or, as a hardware fallback, hold <span class="kbd">BOOT</span> for 6 seconds.)</li>
+      </ol>
+    </div>
+
+    <footer>
+      DeskTicker · ESP32-S3 desk trading terminal<br />
+      Firmware downloads &amp; changelog: see the project’s GitHub Releases.
+    </footer>
+  </div>
+</body>
+</html>

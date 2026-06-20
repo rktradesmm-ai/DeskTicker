@@ -47,7 +47,9 @@
 #define RECONNECT_SOFT_TRIES   3     // quick reconnect attempts before showing full screen
 #define RECONNECT_SOFT_MS   5000     // per-attempt timeout ms (~15 s total soft window)
 #define NTP_SERVER        "pool.ntp.org"
-#define RESET_BTN_GPIO    0   // BOOT button on ESP32-S3 — hold 3 s to re-run setup
+#define RESET_BTN_GPIO    0   // BOOT button on ESP32-S3 — hold 6 s to re-run setup
+#define RESET_HOLD_MS     6000 // BOOT hold time to wipe settings (6 s, not 3 s, so the
+                               // USB flashing gesture "hold BOOT, tap RST" can't trigger it)
 // Forex/futures use local session math, but local time can't know about bank holidays.
 // On a holiday the market's last trade (regularMarketTime) goes stale. If the local
 // session says "open" but the last trade is older than this, treat it as closed
@@ -694,11 +696,13 @@ void loop() {
     // so SD I/O never adds bus pressure in the WiFi/QSPI-DMA-sensitive window.
     sdlog_flush();
 
-    // 3-second hold on BOOT button → wipe all settings and return to setup
+    // 6-second hold on BOOT button → wipe all settings and return to setup.
+    // (Normal way to do this is the on-screen "Re-do WiFi Setup" button; this
+    // BOOT hold is the hardware fallback for when the touchscreen is unreachable.)
     if (digitalRead(RESET_BTN_GPIO) == LOW) {
         if (btn_held_since == 0) btn_held_since = millis();
-        else if (millis() - btn_held_since >= 3000) {
-            sdlog_println("[reset] button held 3 s — clearing settings and rebooting");
+        else if (millis() - btn_held_since >= RESET_HOLD_MS) {
+            sdlog_println("[reset] button held 6 s — clearing settings and rebooting");
             sdlog_flush_blocking();
             settings_clear();
             delay(200);

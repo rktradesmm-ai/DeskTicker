@@ -342,10 +342,37 @@ Once the drive is ejected, tap the screen — the device reboots and the ticker 
 
 ## Reset / Return to Setup
 
-**Hold the BOOT button for 3 seconds.**
+**Normal way (no buttons):** triple-tap the screen → **Settings** → **"Re-do WiFi Setup"**.
+This wipes saved settings and restarts the device into setup mode.
 
-The **BOOT** button is the small button labeled BOOT on the ESP32-S3 board (GPIO 0) —
-not the RST/Reset button. All saved settings are wiped and the device restarts into setup mode.
+**Hardware fallback — hold the BOOT button for 6 seconds.** Use this if the touchscreen
+is unreachable. The **BOOT** button is the small button labeled BOOT on the ESP32-S3 board
+(GPIO 0) — not the RST/Reset button. (The hold is 6 s, not 3 s, so the firmware-update
+gesture — *hold BOOT, tap RST* — can't accidentally wipe your settings.)
+
+---
+
+## Updating the Firmware
+
+You can update DeskTicker to a newer firmware version **straight from a web browser** —
+no Arduino IDE needed.
+
+1. On a computer (not a phone), open the updater page in **Google Chrome** or
+   **Microsoft Edge**: **`https://<your-github-user>.github.io/DeskTicker/`**
+2. Connect the DeskTicker with the **USB-C** cable.
+3. **Put it in update mode:** press and **hold BOOT**, briefly tap **RST**, then release
+   **BOOT** (the two small buttons on the board).
+4. Click **Install** and choose the serial port that appears.
+5. To **keep your settings** (Wi-Fi, tickers, theme), leave **"Erase device" unchecked**.
+   Tick it only for a clean reset / recovery.
+6. When it finishes, press **RST** once to start the new firmware.
+
+> Only Chrome/Edge on a desktop can flash over USB (they support WebSerial). Because the
+> board uses the ESP32-S3 native USB (no serial bridge), the manual BOOT/RST step in
+> step 3 is required — the page can't reset the board automatically.
+
+*Maintainers:* see [`../docs/PUBLISHING.md`](../docs/PUBLISHING.md) for how to build and
+publish a new version.
 
 ---
 
