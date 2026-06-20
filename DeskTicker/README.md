@@ -119,7 +119,7 @@ into your Arduino `libraries` directory.
 3. Open a browser and go to **`192.168.4.1`** (captive portal may open automatically).
 4. Configure:
    - **WiFi** — your network name and password
-   - **Assets** — pick up to 6, grouped by class (Crypto / Stocks & ETFs / Commodities / Forex)
+   - **Assets** — pick up to 6, grouped by class (Crypto / Stocks & ETFs / Commodities / Forex). You can also type a **Custom** Yahoo Finance symbol — see [Custom Tickers](#custom-tickers)
    - **Timeframes** — select one or more (15m / 1h / 4h / 1D); swipe up/down on the chart to cycle between them
    - **Timezone** — UTC offset for your location
    - **Candle Colour** — Classic, Color Shift, Neon Pulse, or Custom
@@ -145,6 +145,57 @@ into your Arduino `libraries` directory.
 
 For details on Yahoo Finance data providers, see:
 https://help.yahoo.com/kb/finance-for-web/exchanges-data-providers-yahoo-finance-sln2310.html
+
+---
+
+## Custom Tickers
+
+Beyond the built-in list above, you can add **any symbol that exists on Yahoo Finance**
+(e.g. `PLTR`, `SOL-USD`, `EURGBP=X`, `CL=F`). The device looks the symbol up on Yahoo and
+**auto-detects** everything it needs:
+
+- **Asset class** (Stock / Crypto / Forex / Futures) — from Yahoo's `instrumentType`
+- **Display name** — from Yahoo's short/long name
+- **Decimal places** — from Yahoo's price hint
+
+Custom tickers are saved in a small **library of up to 6** on the device and appear in the
+asset picker right alongside the built-ins. Use the symbol exactly as Yahoo Finance lists it
+(open finance.yahoo.com and check the symbol in the quote header / URL).
+
+### Add one on the device (recommended)
+
+1. Triple-tap to open **Settings → Assets**.
+2. Tap **+ Add custom ticker**.
+3. Type the symbol on the on-screen keyboard and tap **Add** (or the keyboard's ✓).
+4. The device checks Yahoo and, on success, shows the detected class and name — e.g.
+   `Added & selected: PLTR - Stock / Palantir Technologies (2 dp)`. The new ticker is
+   selected automatically if you have a free slot among the 6.
+5. Tap **Save & Restart**.
+
+A brief (~1–3 s) screen freeze during the check is normal — it's the same pause as a regular
+data fetch.
+
+### Add one during first-time setup
+
+The setup web form has a **Custom** field in the Assets card. Because the setup hotspot has no
+internet, the symbol can't be checked at that moment — it is saved and **classified
+automatically the first time it loads** after the device joins your WiFi. Until then its row
+shows **`[Pending]`**.
+
+### Confirming the detected class
+
+Each custom ticker's row in **Settings → Assets** shows its class — e.g.
+`PLTR  [Stock] Palantir` or `SOL-USD  [Crypto] Solana`. If a class looks wrong, tap the **🗑**
+next to it to remove it, then re-add it.
+
+### Notes & limits
+
+- The **library holds 6 customs**; the on-screen selection limit is still **6 tickers total**
+  (built-ins + customs combined).
+- **Built-ins win** — a symbol matching a built-in (e.g. `AAPL`) is rejected as "already a
+  built-in ticker"; duplicates are rejected too.
+- An invalid symbol (typo) is rejected with a "not found" message and nothing is saved.
+- Removing a custom that is currently selected also removes it from your active list.
 
 ---
 
@@ -218,7 +269,7 @@ Triple-tap the chart or after-hours screen to open the **Settings** menu without
 
 | Section | What you can change |
 |---------|---------------------|
-| Assets | Which tickers are shown (1–6); grouped by Crypto / Stocks & ETFs / Commodities / Forex |
+| Assets | Which tickers are shown (1–6); grouped by Crypto / Stocks & ETFs / Commodities / Forex. **+ Add custom ticker** adds any Yahoo Finance symbol — see [Custom Tickers](#custom-tickers) |
 | Timeframes | Which intervals are active (15m / 1h / 4h / 1D); swipe cycles through them |
 | Timezone | UTC offset for your location |
 | Candle Colour | Classic, Color Shift, Neon Pulse, or Custom (swatches shown for each option) |
@@ -295,7 +346,7 @@ not the RST/Reset button. All saved settings are wiped and the device restarts i
 ```
 DeskTicker/
 ├── DeskTicker.ino         # Main sketch & state machine
-├── assets.h               # Ticker definitions, candle & data structs
+├── assets.h / .cpp        # Ticker definitions & structs; custom-ticker library + symbol lookup
 ├── settings.h / .cpp      # NVS preferences (WiFi, assets, timeframes, timezone, theme)
 ├── wifi_manager.h / .cpp  # Captive-portal setup UI + web form handler
 ├── api_client.h / .cpp    # Yahoo Finance v8 chart API, 4H aggregation, host fallback

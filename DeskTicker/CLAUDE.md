@@ -27,9 +27,10 @@ a candlestick chart on a 3.5" 480×320 IPS touchscreen. No cloud backend, no API
 | File | Responsibility |
 |------|---------------|
 | `DeskTicker.ino` | Main state machine, WiFi/NTP lifecycle, loop orchestration |
-| `assets.h` | `AssetDef` / `AssetData` / `Candle` structs; `ASSETS[]` table (24 assets); `asset_find()` |
+| `assets.h` | `AssetDef` / `AssetData` / `Candle` structs; built-in `ASSETS[]` table; custom-ticker + `asset_find()` API declarations |
+| `assets.cpp` | `asset_find()` (built-ins, then customs); writable custom-ticker registry + NVS load/save |
 | `settings.h / .cpp` | `Settings` struct; NVS load/save via Arduino `Preferences` |
-| `api_client.h / .cpp` | Yahoo Finance v8 chart API fetch; 4H aggregation; host fallback |
+| `api_client.h / .cpp` | Yahoo Finance v8 chart API fetch; 4H aggregation; host fallback; `api_probe_symbol()` (custom-ticker lookup + classify) |
 | `chart_screen.h / .cpp` | LVGL chart screen: header, candle canvas, y-axis canvas, footer |
 | `wifi_manager.h / .cpp` | AP captive-portal setup UI (LVGL screen + HTTP web form); asset picker grouped into Crypto / Stocks & ETFs / Commodities / Forex sections |
 | `animations.h / .cpp` | After-hours fullscreen animations: tidepool, coral reef, starfield (with clock), countdown, pixel beach, grassland |
@@ -245,8 +246,50 @@ Stored in NVS namespace `"lilfish"` via `Preferences`. **Do not rename this name
 | `cycle` | int | Auto-cycle seconds (0 = manual) |
 | `anim` | int | ANIM_* |
 | `tz` | int | UTC offset in minutes (e.g. −300 = UTC−5) |
+| `c_n` | int | Custom-ticker count (0–6); absent ⇒ 0 (back-compat) |
+| `c{i}_sym` / `_yh` / `_nm` | string | Custom i: symbol / Yahoo query / display name |
+| `c{i}_m` / `_d` / `_c` / `_p` | uchar | Custom i: market / decimals / continuous / provisional |
 
 On load, if `tf_n` is missing (old firmware), the single saved `tf` is wrapped into `timeframes[0]` for backward compatibility.
+
+The custom-ticker keys (`c_*`) are written by `custom_save_to_nvs()` in `assets.cpp`, not by `settings_save()` — see below.
+
+---
+
+## Custom Tickers (`assets.cpp`)
+
+Users can add arbitrary Yahoo symbols on top of the built-in `ASSETS[]` table.
+
+- **Registry:** `asset_find()` lives in `assets.cpp` (no longer `inline` in the header) so a
+  single writable `g_custom[MAX_CUSTOM]` table can be searched **after** the built-ins — a
+  custom can never shadow a built-in. The header exposes `custom_add/remove/get/count/index`,
+  `symbol_normalize()`, `symbol_is_builtin()`, `custom_is_provisional()`, `custom_update()`,
+  and `custom_load/save_to_nvs()`. Every TU still gets its own `static const ASSETS[]` copy
+  from the header — only the lookup and the writable custom table are centralised.
+- **Persistence:** stored in the same `"lilfish"` namespace under `c_n` + `c{i}_*` keys.
+  Saved immediately on add/remove (the library is independent of the Settings Save/Cancel
+  working copy). Old NVS without `c_*` keys loads as an empty library — fully back-compatible.
+  `settings_clear()` wipes customs too. `custom_load_from_nvs()` runs in `setup()` right after
+  `settings_load()` so `asset_find()` can resolve custom symbols before the first fetch.
+- **Classification:** `api_probe_symbol()` does one small Yahoo chart fetch and maps
+  `meta.instrumentType` → market/continuous (CRYPTOCURRENCY→crypto; CURRENCY→forex;
+  FUTURE→stock+continuous; else stock), `shortName`/`longName` → name, `priceHint` → decimals.
+  It **must** run from the main loop wrapped in `lvgl_flush_suspended` (never an LVGL
+  callback — that runs on the render task and would starve the watchdog feed), exactly like a
+  normal fetch.
+- **On-device add:** the LVGL settings UI cannot block on the network, so a keyboard handler
+  sets a `volatile` request flag (drained by `settings_screen_take_probe_request()` in
+  `S_SETTINGS`); the main loop runs the probe and calls `settings_screen_apply_probe_result()`
+  under `LV_LOCK`. On success the custom is added, persisted, and auto-selected if a slot is free.
+- **Portal add:** the setup AP has no internet, so a portal-added custom is stored
+  **provisional** (generic stock, `continuous=1` to keep the fetch window 24/7-sized and avoid
+  the heap-exhaustion crash). After the first successful fetch, `S_FETCH` probes it once via
+  `custom_is_provisional()` → `api_probe_symbol()` → `custom_update()`, then persists and clears
+  the flag. The settings UI shows the detected class per row (`[Stock]`/`[Crypto]`/…, or
+  `[Pending]` while provisional).
+- **Limits:** library holds `MAX_CUSTOM` (6); the on-screen selection cap is still `MAX_ASSETS`
+  (6) shared by built-ins + customs. Probe uses the typed symbol as both display symbol and
+  Yahoo query (v1), so symbols must fit `ASSET_SYM_LEN−1` (9 chars).
 
 ---
 
