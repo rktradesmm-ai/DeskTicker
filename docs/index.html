@@ -87,6 +87,10 @@
     .warn { color: var(--bear); font-weight: 600; }
     .ok   { color: var(--bull); font-weight: 600; }
     a { color: var(--bull); }
+    .shot { display:block; width:100%; max-width:440px; margin:10px 0 4px;
+            border:1px solid var(--line); border-radius:8px; cursor:zoom-in; }
+    .shot-narrow { max-width:300px; }
+    .caption { color: var(--muted); font-size: 13px; }
     code { background: #1d2731; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
     footer { text-align: center; color: var(--muted); font-size: 13px; margin-top: 40px; }
   </style>
@@ -110,8 +114,19 @@
         <li>Plug the DeskTicker into your computer with the <strong>USB-C cable</strong>.</li>
         <li><strong>Put it in update mode:</strong> press and <span class="kbd">HOLD BOOT</span>,
             briefly tap <span class="kbd">RST</span>, then release <span class="kbd">BOOT</span>.
-            <span class="note">(The two small buttons on the back of the device.)</span></li>
-        <li>Click <strong>Install</strong> below and pick the new serial port that appears.</li>
+            <span class="note">(The two small buttons on the back of the device — see photo.)</span>
+            <a href="img/Device-reset-boot-buttons.jpg" target="_blank" rel="noopener">
+              <img class="shot" src="img/Device-reset-boot-buttons.jpg"
+                   alt="Location of the BOOT and Reset buttons on the back of the device" />
+            </a>
+            <span class="caption">Tap the photo to enlarge.</span></li>
+        <li>Click <strong>Install</strong> below and pick the serial port described as
+            <strong>“USB JTAG/serial debug unit”</strong> (the COM number may differ).
+            <a href="img/COM-flash-edit.png" target="_blank" rel="noopener">
+              <img class="shot shot-narrow" src="img/COM-flash-edit.png"
+                   alt="Choose the port labelled USB JTAG/serial debug unit" />
+            </a>
+            <span class="caption">Tap the picture to enlarge.</span></li>
         <li>To <span class="ok">keep your settings</span> (Wi-Fi, tickers, theme),
             leave the <em>“Erase device”</em> box <strong>unchecked</strong>.
             Tick it only for a clean reset / recovery.</li>
