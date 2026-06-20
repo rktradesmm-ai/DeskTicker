@@ -12,3 +12,9 @@ DeskTicker/*.tmp.*
 *.bin
 *.elf
 build/
+
+# ...but DO publish the web-updater firmware binaries (ESP Web Tools needs them)
+!docs/firmware/**/*.bin
+
+# Private brand spec — kept locally, must NOT be committed/made public
+DeskTicker_Brand_Kit.md
