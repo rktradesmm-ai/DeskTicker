@@ -358,7 +358,7 @@ You can update DeskTicker to a newer firmware version **straight from a web brow
 no Arduino IDE needed.
 
 1. On a computer (not a phone), open the updater page in **Google Chrome** or
-   **Microsoft Edge**: **`https://<your-github-user>.github.io/DeskTicker/`**
+   **Microsoft Edge**: **`https://rktradesmm-ai.github.io/DeskTicker/`**
 2. Connect the DeskTicker with the **USB-C** cable.
 3. **Put it in update mode:** press and **hold BOOT**, briefly tap **RST**, then release
    **BOOT** (the two small buttons on the board).
