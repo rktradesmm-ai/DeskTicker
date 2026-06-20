@@ -188,6 +188,13 @@ static String build_html(Settings* s) {
         }
         html += F("</div>");
     }
+    // Custom ticker — a free-text Yahoo symbol. The setup AP has no internet, so it
+    // can't be validated here; the device checks/classifies it on first connect.
+    html += F("<p class='asset-group-label'>Custom</p>"
+              "<input type='text' name='custom' maxlength='9' "
+              "placeholder='Add any Yahoo symbol, e.g. PLTR' "
+              "oninput='this.value=this.value.toUpperCase()'>"
+              "<p class='note'>Checked automatically the first time it loads.</p>");
     html += F("</div>");
 
     // Timeframe — checkboxes, at least one required, swipe up/down to cycle on device
@@ -318,6 +325,35 @@ static void handle_save() {
     if (s->asset_count == 0) {
         strncpy(s->assets[0], "SPY", ASSET_SYM_LEN - 1);
         s->asset_count = 1;
+    }
+
+    // Custom ticker (optional). No internet in setup AP mode, so we can't validate
+    // against Yahoo here — store it provisionally as a generic 24/7 stock so the
+    // fetch window stays small, and let the device auto-classify it on first connect.
+    if (server.hasArg("custom")) {
+        char sym[ASSET_SYM_LEN];
+        strncpy(sym, server.arg("custom").c_str(), sizeof(sym) - 1);
+        sym[sizeof(sym) - 1] = '\0';
+        symbol_normalize(sym);
+        if (sym[0] && !symbol_is_builtin(sym) &&
+            custom_index(sym) < 0 && !custom_is_full()) {
+            AssetDef d;
+            memset(&d, 0, sizeof(d));
+            strncpy(d.symbol, sym, sizeof(d.symbol) - 1);
+            strncpy(d.yahoo,  sym, sizeof(d.yahoo)  - 1);
+            strncpy(d.name,   sym, sizeof(d.name)   - 1);
+            d.market     = MARKET_STOCK;
+            d.decimals   = 2;
+            d.continuous = 1;   // 24/7-sized fetch window until classified
+            if (custom_add(&d, true)) {
+                custom_save_to_nvs();
+                if (s->asset_count < MAX_ASSETS) {
+                    strncpy(s->assets[s->asset_count], sym, ASSET_SYM_LEN - 1);
+                    s->assets[s->asset_count][ASSET_SYM_LEN - 1] = '\0';
+                    s->asset_count++;
+                }
+            }
+        }
     }
 
     // Timeframe — collect all checked values (checkboxes)

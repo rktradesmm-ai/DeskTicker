@@ -7,6 +7,10 @@
 #define ASSET_NAME_LEN  20
 #define ASSET_YAHOO_LEN 16
 
+// Maximum number of user-added "custom" tickers kept in the saved library
+// (in addition to the built-in ASSETS[] table). Persisted in NVS.
+#define MAX_CUSTOM      6
+
 typedef enum {
     MARKET_STOCK     = 0,
     MARKET_CRYPTO    = 1,
@@ -89,9 +93,41 @@ static const AssetDef ASSETS[TOTAL_ASSETS] = {
     {"DXY",    "US Dollar Idx", "DX-Y.NYB",  MARKET_FOREX,     3, 0},
 };
 
-inline const AssetDef* asset_find(const char* symbol) {
-    for (int i = 0; i < TOTAL_ASSETS; i++) {
-        if (strcmp(ASSETS[i].symbol, symbol) == 0) return &ASSETS[i];
-    }
-    return nullptr;
-}
+// Resolve a user-facing symbol (e.g. "BTC", "PLTR") to its full definition.
+// Searches the built-in ASSETS[] table first, then the user's custom library.
+// Returns nullptr if the symbol is unknown. Defined in assets.cpp.
+const AssetDef* asset_find(const char* symbol);
+
+// ── Custom-ticker library ─────────────────────────────────────────────────────
+// User-added Yahoo Finance tickers, stored as full AssetDefs in a small writable
+// registry that lives in RAM for the program's lifetime and is persisted to NVS.
+// Built-in tickers always take priority in asset_find(); a custom can never shadow
+// one. Implemented in assets.cpp.
+
+// How many custom tickers are currently in the library (0..MAX_CUSTOM).
+int custom_count();
+// Get the custom AssetDef at index i (0..custom_count()-1), or nullptr if out of range.
+const AssetDef* custom_get(int i);
+// True if the custom library is at capacity (cannot add more).
+bool custom_is_full();
+// Index of a custom by symbol, or -1 if not present.
+int custom_index(const char* symbol);
+// True if `symbol` matches one of the built-in ASSETS[] entries.
+bool symbol_is_builtin(const char* symbol);
+// Trim surrounding spaces and uppercase `s` in place (Yahoo symbols are uppercase).
+void symbol_normalize(char* s);
+// Add a custom ticker. Rejects duplicates, built-in clashes, or a full library.
+// `provisional` marks a portal-added ticker whose type still needs Yahoo classification.
+// Returns true on success. Does NOT persist — call custom_save_to_nvs() after.
+bool custom_add(const AssetDef* d, bool provisional);
+// Remove a custom ticker by symbol. Returns true if it was present.
+bool custom_remove(const char* symbol);
+// True if the named custom is still provisional (added via the setup portal,
+// not yet classified against Yahoo).
+bool custom_is_provisional(const char* symbol);
+// Replace an existing custom's definition (matched by symbol) and clear its
+// provisional flag. Returns false if no custom with that symbol exists.
+bool custom_update(const AssetDef* d);
+// Load / save the custom library from / to NVS (namespace "lilfish").
+void custom_load_from_nvs();
+void custom_save_to_nvs();

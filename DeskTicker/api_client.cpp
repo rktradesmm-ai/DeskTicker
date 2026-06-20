@@ -658,3 +658,159 @@ unsigned long api_refresh_interval(int timeframe) {
 bool asset_always_open(const AssetDef* a) {
     return a && a->market == MARKET_CRYPTO;
 }
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Custom-ticker validation + auto-classification
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Map Yahoo's meta.instrumentType string to our (market, continuous) model.
+// Yahoo returns these uppercase. Anything unrecognised falls back to a regular
+// stock — a safe default that still renders and uses normal exchange-hours logic.
+static void classify_instrument(const char* it, MarketType* market, uint8_t* continuous) {
+    *market = MARKET_STOCK;
+    *continuous = 0;
+    if (!it) return;
+    if      (strcmp(it, "CRYPTOCURRENCY") == 0) { *market = MARKET_CRYPTO; *continuous = 0; }
+    else if (strcmp(it, "CURRENCY")       == 0) { *market = MARKET_FOREX;  *continuous = 0; }
+    else if (strcmp(it, "FUTURE")         == 0) { *market = MARKET_STOCK;  *continuous = 1; }
+    // EQUITY / ETF / INDEX / MUTUALFUND / anything else → MARKET_STOCK, continuous=0
+}
+
+// Probe one host for the symbol's metadata. Returns true and fills `out->def`
+// on success; on failure sets out->err and returns false (caller tries fallback).
+static bool probe_try_host(const char* host, const char* sym, AssetProbeResult* out) {
+    time_t now = time(nullptr);
+    if (now < 1704067200L) now = 1704067200L;
+    time_t p1 = now - 5L * 86400;   // tiny window — we only need the `meta` block
+
+    char url[256];
+    snprintf(url, sizeof(url),
+        "https://%s/v8/finance/chart/%s"
+        "?interval=1d&period1=%ld&period2=%ld&includePrePost=false",
+        host, sym, (long)p1, (long)now);
+    sdlog_printf("[YF] probe GET %s\n", url);
+
+    WiFiClientSecure client;
+    client.setInsecure();
+    client.setHandshakeTimeout(10);   // seconds — bound the TLS handshake (see yf_try_host)
+
+    HTTPClient http;
+    http.useHTTP10(true);
+    http.setConnectTimeout(10000);
+    http.setTimeout(15000);
+    if (!http.begin(client, url)) {
+        strncpy(out->err, "begin failed", sizeof(out->err) - 1);
+        return false;
+    }
+    http.addHeader("User-Agent",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36");
+    http.addHeader("Accept",          "application/json");
+    http.addHeader("Accept-Encoding", "identity");
+    http.addHeader("Referer",         "https://finance.yahoo.com/");
+
+    int code = http.GET();
+    sdlog_printf("[YF] probe %s HTTP %d\n", sym, code);
+    if (code != 200) {
+        // 404 here usually means the symbol does not exist on Yahoo.
+        snprintf(out->err, sizeof(out->err), (code == 404) ? "symbol not found" : "HTTP %d", code);
+        http.end();
+        return false;
+    }
+
+    String resp;
+    http_read_body(http, resp, 25000);
+    http.end();
+    if (resp.length() < 20) {
+        strncpy(out->err, "empty reply", sizeof(out->err) - 1);
+        return false;
+    }
+
+    // Whitelist only the meta fields we need to classify the ticker.
+    StaticJsonDocument<384> filter;
+    filter["chart"]["result"][0]["meta"]["instrumentType"]     = true;
+    filter["chart"]["result"][0]["meta"]["shortName"]          = true;
+    filter["chart"]["result"][0]["meta"]["longName"]           = true;
+    filter["chart"]["result"][0]["meta"]["priceHint"]          = true;
+    filter["chart"]["result"][0]["meta"]["regularMarketPrice"] = true;
+    filter["chart"]["error"]                                   = true;
+
+    PsramJsonDocument doc(8192);
+    DeserializationError derr = deserializeJson(doc, resp,
+                                    DeserializationOption::Filter(filter));
+    resp = String();
+    if (derr) {
+        snprintf(out->err, sizeof(out->err), "JSON: %s", derr.c_str());
+        return false;
+    }
+    if (!doc["chart"]["error"].isNull()) {
+        strncpy(out->err, "symbol not found", sizeof(out->err) - 1);
+        return false;
+    }
+
+    JsonObject meta = doc["chart"]["result"][0]["meta"];
+    if (meta.isNull()) {
+        strncpy(out->err, "no data for symbol", sizeof(out->err) - 1);
+        return false;
+    }
+    float price = meta["regularMarketPrice"] | 0.0f;
+    if (!(price > 0.0f)) {
+        strncpy(out->err, "no price for symbol", sizeof(out->err) - 1);
+        return false;
+    }
+
+    // Build the definition from the metadata.
+    AssetDef d;
+    memset(&d, 0, sizeof(d));
+    strncpy(d.symbol, sym, sizeof(d.symbol) - 1);
+    strncpy(d.yahoo,  sym, sizeof(d.yahoo)  - 1);   // v1: query symbol == typed symbol
+
+    const char* it = meta["instrumentType"] | "";
+    classify_instrument(it, &d.market, &d.continuous);
+
+    const char* nm = meta["shortName"] | "";
+    if (!nm[0]) nm = meta["longName"] | "";
+    if (!nm[0]) nm = sym;
+    strncpy(d.name, nm, sizeof(d.name) - 1);
+
+    int ph = meta["priceHint"] | 2;
+    if (ph < 0) ph = 0;
+    if (ph > 6) ph = 6;
+    d.decimals = (uint8_t)ph;
+
+    out->def = d;
+    out->ok  = true;
+    out->err[0] = '\0';
+    sdlog_printf("[YF] probe %s OK type=%s name=%s dec=%d mkt=%d cont=%d\n",
+                  sym, it, d.name, d.decimals, (int)d.market, (int)d.continuous);
+    return true;
+}
+
+bool api_probe_symbol(const char* symbol, AssetProbeResult* out) {
+    memset(out, 0, sizeof(*out));
+    out->ok = false;
+
+    if (!symbol || !symbol[0]) {
+        strncpy(out->err, "empty symbol", sizeof(out->err) - 1);
+        return false;
+    }
+
+    // Normalise a local copy (uppercase, trimmed). The typed symbol is used both
+    // as the display symbol and the Yahoo query symbol.
+    char sym[ASSET_YAHOO_LEN];
+    strncpy(sym, symbol, sizeof(sym) - 1);
+    sym[sizeof(sym) - 1] = '\0';
+    symbol_normalize(sym);
+
+    // Must fit the display-symbol field so asset_find() can match it later.
+    if (strlen(sym) >= ASSET_SYM_LEN) {
+        strncpy(out->err, "symbol too long", sizeof(out->err) - 1);
+        return false;
+    }
+
+    if (probe_try_host(YF_HOST_PRIMARY, sym, out)) return true;
+    loop_wdt_feed();   // primary may have burned part of the watchdog budget
+    if (probe_try_host(YF_HOST_FALLBACK, sym, out)) return true;
+    return false;
+}

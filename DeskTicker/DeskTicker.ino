@@ -628,8 +628,11 @@ void setup() {
 
     // Load settings from NVS
     settings_load(&cfg);
-    sdlog_printf("[setup] settings loaded: wifi_ok=%d assets=%d tf=%d brightness=%d\n",
-                  cfg.wifi_ok, cfg.asset_count, cfg.timeframe, cfg.brightness);
+    // Load the user's custom-ticker library so asset_find() can resolve any
+    // custom symbols stored in cfg.assets[] before the first fetch.
+    custom_load_from_nvs();
+    sdlog_printf("[setup] settings loaded: wifi_ok=%d assets=%d tf=%d brightness=%d customs=%d\n",
+                  cfg.wifi_ok, cfg.asset_count, cfg.timeframe, cfg.brightness, custom_count());
     bsp_display_brightness_set(cfg.brightness);
 
     // After settings are loaded: restore the last-viewed asset and timeframe so the
@@ -859,6 +862,26 @@ void loop() {
 
         last_fetch_ms = millis();
         last_cycle_ms = millis();
+
+        // One-time auto-classify for a custom ticker added via the setup portal.
+        // The portal has no internet (SoftAP), so it stores customs provisionally as
+        // a generic 24/7 stock. Now that we're online and have just fetched this
+        // asset successfully, probe Yahoo once to set its real market type / name /
+        // decimals, persist it, and clear the provisional flag. Wrapped in the same
+        // display-suspend window as the fetch so it can't race QSPI DMA.
+        if (custom_is_provisional(cfg.assets[cur_idx])) {
+            AssetProbeResult pr;
+            lvgl_flush_suspended = true;
+            bool pok = api_probe_symbol(cfg.assets[cur_idx], &pr);
+            lvgl_flush_suspended = false;
+            loop_wdt_feed();
+            if (pok && custom_update(&pr.def)) {
+                custom_save_to_nvs();
+                sdlog_printf("[custom] classified %s -> mkt=%d cont=%d dec=%d\n",
+                              pr.def.symbol, (int)pr.def.market,
+                              (int)pr.def.continuous, (int)pr.def.decimals);
+            }
+        }
 
         bool ah = is_after_hours(cur_idx);
 
@@ -1104,6 +1127,31 @@ void loop() {
         }
 
         int r = settings_screen_poll();
+
+        // Drain a pending "add custom ticker" request from the settings UI. The
+        // blocking Yahoo lookup must run here in the main loop (never inside an LVGL
+        // callback, which runs on the render task and would starve the watchdog feed),
+        // wrapped in the same display-suspend window as a normal fetch.
+        {
+            char probe_sym[ASSET_SYM_LEN];
+            if (settings_screen_take_probe_request(probe_sym)) {
+                AssetProbeResult pr;
+                memset(&pr, 0, sizeof(pr));
+                if (!wifi_is_connected()) {
+                    pr.ok = false;
+                    strncpy(pr.err, "Connect to WiFi first", sizeof(pr.err) - 1);
+                } else {
+                    lvgl_flush_suspended = true;
+                    api_probe_symbol(probe_sym, &pr);
+                    lvgl_flush_suspended = false;
+                    loop_wdt_feed();
+                }
+                if (LV_LOCK()) {
+                    settings_screen_apply_probe_result(&pr);
+                    LV_UNLOCK();
+                }
+            }
+        }
 
         if (r == 1) {
             // User pressed Save — retrieve edited settings, write NVS, restart.

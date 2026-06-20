@@ -10,6 +10,7 @@
 #include "settings_screen.h"
 #include "settings.h"
 #include "assets.h"
+#include "api_client.h"     // AssetProbeResult for the custom-ticker probe handshake
 #include "tz_options.h"
 #include "chart_screen.h"   // SCR_W, SCR_H
 #include "display.h"        // bsp_display_brightness_set
@@ -57,6 +58,25 @@ static lv_obj_t* page_diag   = nullptr;
 // Widget handles needed across callbacks
 static lv_obj_t* asset_count_lbl  = nullptr;
 static lv_obj_t* asset_cbs[TOTAL_ASSETS];
+static lv_obj_t* custom_cbs[MAX_CUSTOM] = {nullptr};
+
+// "Add custom ticker" sub-page widgets
+static lv_obj_t* page_addsym   = nullptr;
+static lv_obj_t* addsym_ta     = nullptr;   // text area for the typed symbol
+static lv_obj_t* addsym_kb     = nullptr;   // on-screen keyboard
+static lv_obj_t* addsym_status = nullptr;   // result / error line
+static lv_obj_t* addsym_btn    = nullptr;   // the "Add" button (disabled during probe)
+
+// Probe handshake: an LVGL event handler sets ss_probe_req with a symbol; the main
+// loop performs the blocking Yahoo lookup and calls settings_screen_apply_probe_result().
+static volatile bool ss_probe_req = false;
+static char          ss_probe_sym[ASSET_SYM_LEN] = {0};
+
+// Forward declarations (definitions appear later in the file).
+static void build_assets_page();
+static void rebuild_assets_page(bool show_it);
+static void go_addsym_cb(lv_event_t* e);
+static void custom_remove_cb(lv_event_t* e);
 
 static lv_obj_t* tf_cbs[4]        = {nullptr};
 
@@ -327,14 +347,26 @@ static void refresh_asset_count_lbl() {
     lv_label_set_text(asset_count_lbl, buf);
 }
 
-// Rebuild ss_work.assets[] from the current checkbox state.
+// Rebuild ss_work.assets[] from the current checkbox state (built-ins then customs).
 static void sync_assets_from_cbs() {
     ss_work.asset_count = 0;
     for (int i = 0; i < TOTAL_ASSETS; i++) {
         if (!asset_cbs[i]) continue;
+        if (ss_work.asset_count >= MAX_ASSETS) break;
         if (lv_obj_has_state(asset_cbs[i], LV_STATE_CHECKED)) {
             strncpy(ss_work.assets[ss_work.asset_count],
                     ASSETS[i].symbol, ASSET_SYM_LEN - 1);
+            ss_work.assets[ss_work.asset_count][ASSET_SYM_LEN - 1] = '\0';
+            ss_work.asset_count++;
+        }
+    }
+    for (int i = 0; i < MAX_CUSTOM; i++) {
+        if (!custom_cbs[i]) continue;
+        if (ss_work.asset_count >= MAX_ASSETS) break;
+        if (lv_obj_has_state(custom_cbs[i], LV_STATE_CHECKED)) {
+            const AssetDef* d = custom_get(i);
+            if (!d) continue;
+            strncpy(ss_work.assets[ss_work.asset_count], d->symbol, ASSET_SYM_LEN - 1);
             ss_work.assets[ss_work.asset_count][ASSET_SYM_LEN - 1] = '\0';
             ss_work.asset_count++;
         }
@@ -367,10 +399,14 @@ static void asset_cb_handler(lv_event_t* e) {
     lv_obj_t* cb  = lv_event_get_target(e);
     bool checked  = lv_obj_has_state(cb, LV_STATE_CHECKED);
 
-    // Count currently checked boxes (including this change)
+    // Count currently checked boxes (built-ins + customs, including this change)
     int count = 0;
     for (int i = 0; i < TOTAL_ASSETS; i++) {
         if (asset_cbs[i] && lv_obj_has_state(asset_cbs[i], LV_STATE_CHECKED))
+            count++;
+    }
+    for (int i = 0; i < MAX_CUSTOM; i++) {
+        if (custom_cbs[i] && lv_obj_has_state(custom_cbs[i], LV_STATE_CHECKED))
             count++;
     }
 
@@ -382,6 +418,152 @@ static void asset_cb_handler(lv_event_t* e) {
     sync_assets_from_cbs();
     refresh_asset_count_lbl();
     update_main_assets_label();
+}
+
+// ── Custom-ticker UI ──────────────────────────────────────────────────────────
+
+// Set the add-ticker status line text + color.
+static void set_addsym_status(const char* msg, lv_color_t color) {
+    if (!addsym_status) return;
+    lv_label_set_text(addsym_status, msg);
+    lv_obj_set_style_text_color(addsym_status, color, LV_PART_MAIN);
+}
+
+// Validate the typed symbol locally, then request a Yahoo probe from the main loop.
+// Runs in the LVGL task (event callback) — must not perform any networking itself.
+static void addsym_submit() {
+    if (!addsym_ta) return;
+    char sym[ASSET_SYM_LEN];
+    const char* txt = lv_textarea_get_text(addsym_ta);
+    strncpy(sym, txt ? txt : "", sizeof(sym) - 1);
+    sym[sizeof(sym) - 1] = '\0';
+    symbol_normalize(sym);
+
+    if (!sym[0])                { set_addsym_status("Enter a symbol", SS_RED);             return; }
+    if (symbol_is_builtin(sym)) { set_addsym_status("Already a built-in ticker", SS_RED);  return; }
+    if (custom_index(sym) >= 0) { set_addsym_status("Already added", SS_RED);              return; }
+    if (custom_is_full())       { set_addsym_status("Custom list full (6)", SS_RED);       return; }
+
+    strncpy(ss_probe_sym, sym, sizeof(ss_probe_sym) - 1);
+    ss_probe_sym[sizeof(ss_probe_sym) - 1] = '\0';
+    ss_probe_req = true;   // main loop picks this up and runs the blocking lookup
+    set_addsym_status("Checking with Yahoo...", SS_AMBER);
+    if (addsym_btn) lv_obj_add_state(addsym_btn, LV_STATE_DISABLED);
+}
+
+static void addsym_add_cb(lv_event_t*)       { addsym_submit(); }
+static void addsym_kb_ready_cb(lv_event_t*)  { addsym_submit(); }  // keyboard checkmark = Add
+
+// Open the add-ticker sub-page with a clean text field / status line.
+static void go_addsym_cb(lv_event_t*) {
+    if (addsym_ta)  lv_textarea_set_text(addsym_ta, "");
+    if (addsym_btn) lv_obj_clear_state(addsym_btn, LV_STATE_DISABLED);
+    set_addsym_status("", SS_SUBTEXT);
+    show_page(page_addsym, "Add Ticker");
+}
+
+// Delete a custom ticker (trash button). user_data carries its current index.
+static void custom_remove_cb(lv_event_t* e) {
+    int i = (int)(intptr_t)lv_event_get_user_data(e);
+    const AssetDef* d = custom_get(i);
+    if (!d) return;
+    char sym[ASSET_SYM_LEN];
+    strncpy(sym, d->symbol, sizeof(sym) - 1);
+    sym[sizeof(sym) - 1] = '\0';
+
+    // Drop it from the active selection if currently chosen.
+    for (int j = 0; j < ss_work.asset_count; j++) {
+        if (strcmp(ss_work.assets[j], sym) == 0) {
+            for (int k = j; k < ss_work.asset_count - 1; k++)
+                strncpy(ss_work.assets[k], ss_work.assets[k + 1], ASSET_SYM_LEN);
+            ss_work.asset_count--;
+            break;
+        }
+    }
+    // Never leave the user with zero assets.
+    if (ss_work.asset_count < 1) {
+        strncpy(ss_work.assets[0], "SPY", ASSET_SYM_LEN - 1);
+        ss_work.assets[0][ASSET_SYM_LEN - 1] = '\0';
+        ss_work.asset_count = 1;
+    }
+
+    custom_remove(sym);
+    custom_save_to_nvs();        // library persists immediately
+    rebuild_assets_page(true);   // we are on the assets page — keep it visible
+    update_main_assets_label();
+}
+
+// Tear down and rebuild the assets page (used after a custom is added/removed so
+// the checkbox list reflects the new library). `show_it` keeps it visible if the
+// user is currently looking at it.
+static void rebuild_assets_page(bool show_it) {
+    bool was_current = (cur_page == page_assets);
+    if (page_assets) { lv_obj_del(page_assets); page_assets = nullptr; }
+    for (int i = 0; i < TOTAL_ASSETS; i++) asset_cbs[i]  = nullptr;
+    for (int i = 0; i < MAX_CUSTOM;   i++) custom_cbs[i] = nullptr;
+    asset_count_lbl = nullptr;
+    build_assets_page();   // recreates page_assets (hidden)
+    if (show_it || was_current) {
+        lv_obj_clear_flag(page_assets, LV_OBJ_FLAG_HIDDEN);
+        cur_page = page_assets;
+    }
+}
+
+// Build the "Add custom ticker" page: text field + Add button + status + keyboard.
+static void build_addsym_page() {
+    page_addsym = lv_obj_create(ss_scr);
+    lv_obj_set_size(page_addsym, SCR_W, CONT_H);
+    lv_obj_set_pos(page_addsym, 0, HDR_H);
+    style_container(page_addsym);
+    lv_obj_clear_flag(page_addsym, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(page_addsym, LV_OBJ_FLAG_HIDDEN);
+
+    lv_obj_t* hint = lv_label_create(page_addsym);
+    lv_obj_set_style_text_font(hint,  &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_color(hint, SS_SUBTEXT,             LV_PART_MAIN);
+    lv_label_set_text(hint, "Yahoo Finance symbol:");
+    lv_obj_align(hint, LV_ALIGN_TOP_LEFT, 12, 8);
+
+    addsym_ta = lv_textarea_create(page_addsym);
+    lv_textarea_set_one_line(addsym_ta, true);
+    lv_textarea_set_max_length(addsym_ta, ASSET_SYM_LEN - 1);   // 9 chars max
+    lv_textarea_set_placeholder_text(addsym_ta, "e.g. PLTR, SOL-USD");
+    lv_obj_set_width(addsym_ta, SCR_W - 110);
+    lv_obj_align(addsym_ta, LV_ALIGN_TOP_LEFT, 12, 30);
+    lv_obj_set_style_text_font(addsym_ta,    &lv_font_montserrat_16, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(addsym_ta,     SS_HDR,                 LV_PART_MAIN);
+    lv_obj_set_style_text_color(addsym_ta,   SS_TEXT,                LV_PART_MAIN);
+    lv_obj_set_style_border_color(addsym_ta, SS_DIVIDER,             LV_PART_MAIN);
+
+    addsym_btn = lv_btn_create(page_addsym);
+    lv_obj_set_size(addsym_btn, 80, 44);
+    lv_obj_align(addsym_btn, LV_ALIGN_TOP_RIGHT, -12, 30);
+    lv_obj_set_style_bg_color(addsym_btn, lv_color_hex(0x16A34A), LV_PART_MAIN);
+    lv_obj_set_style_radius(addsym_btn, 6, LV_PART_MAIN);
+    lv_obj_set_style_shadow_width(addsym_btn, 0, LV_PART_MAIN);
+    {
+        lv_obj_t* al = lv_label_create(addsym_btn);
+        lv_obj_set_style_text_font(al,  &lv_font_montserrat_16, LV_PART_MAIN);
+        lv_obj_set_style_text_color(al, SS_TEXT,                LV_PART_MAIN);
+        lv_label_set_text(al, "Add");
+        lv_obj_center(al);
+    }
+    lv_obj_add_event_cb(addsym_btn, addsym_add_cb, LV_EVENT_CLICKED, NULL);
+
+    addsym_status = lv_label_create(page_addsym);
+    lv_obj_set_style_text_font(addsym_status,  &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_color(addsym_status, SS_SUBTEXT,             LV_PART_MAIN);
+    lv_label_set_long_mode(addsym_status, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(addsym_status, SCR_W - 24);
+    lv_label_set_text(addsym_status, "");
+    lv_obj_align(addsym_status, LV_ALIGN_TOP_LEFT, 12, 80);
+
+    addsym_kb = lv_keyboard_create(page_addsym);
+    lv_keyboard_set_mode(addsym_kb, LV_KEYBOARD_MODE_TEXT_UPPER);
+    lv_keyboard_set_textarea(addsym_kb, addsym_ta);
+    lv_obj_set_size(addsym_kb, SCR_W, 150);
+    lv_obj_align(addsym_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_add_event_cb(addsym_kb, addsym_kb_ready_cb, LV_EVENT_READY, NULL);
 }
 
 // ── Timeframe page callbacks ──────────────────────────────────────────────────
@@ -458,7 +640,10 @@ static void bri_slider_cb(lv_event_t*) {
 // ── Navigation callbacks ──────────────────────────────────────────────────────
 
 static void back_btn_cb(lv_event_t*) {
-    show_page(page_main, "Settings");
+    // The add-ticker page is reached from the Assets page, so Back returns there;
+    // every other sub-page returns to the main menu.
+    if (cur_page == page_addsym) show_page(page_assets, "Assets");
+    else                         show_page(page_main,   "Settings");
 }
 
 static void go_assets_cb(lv_event_t*)  { show_page(page_assets, "Assets");          }
@@ -690,6 +875,59 @@ static void build_assets_page() {
             asset_cbs[i] = cb;
         }
     }
+
+    // ── Custom tickers (user-added Yahoo symbols) ──
+    make_section_label(page_assets, "CUSTOM");
+    int ncustom = custom_count();
+    for (int i = 0; i < ncustom; i++) {
+        const AssetDef* d = custom_get(i);
+        if (!d) continue;
+
+        lv_obj_t* row = lv_obj_create(page_assets);
+        lv_obj_set_size(row, LV_PCT(100), ROW_H);
+        style_row(row);
+        lv_obj_clear_flag(row, LV_OBJ_FLAG_CLICKABLE);
+
+        lv_obj_t* cb = lv_checkbox_create(row);
+        char lbl_buf[40];
+        snprintf(lbl_buf, sizeof(lbl_buf), "%-6s %s", d->symbol, d->name);
+        lv_checkbox_set_text(cb, lbl_buf);
+        lv_obj_set_style_text_font(cb,  &lv_font_montserrat_14, LV_PART_MAIN);
+        lv_obj_set_style_text_color(cb, SS_TEXT,                LV_PART_MAIN);
+        lv_obj_set_style_bg_color(cb,     SS_BG,      LV_PART_INDICATOR);
+        lv_obj_set_style_border_color(cb, SS_SUBTEXT, LV_PART_INDICATOR);
+        lv_obj_set_style_bg_color(cb,     SS_GREEN,   LV_PART_INDICATOR | LV_STATE_CHECKED);
+        lv_obj_set_style_border_color(cb, SS_GREEN,   LV_PART_INDICATOR | LV_STATE_CHECKED);
+        lv_obj_align(cb, LV_ALIGN_LEFT_MID, 0, 0);
+        lv_obj_add_flag(cb, LV_OBJ_FLAG_CLICKABLE);
+
+        // Pre-check if this custom is in the current selection.
+        for (int j = 0; j < ss_work.asset_count; j++) {
+            if (strcmp(ss_work.assets[j], d->symbol) == 0) {
+                lv_obj_add_state(cb, LV_STATE_CHECKED);
+                break;
+            }
+        }
+        lv_obj_add_event_cb(cb, asset_cb_handler, LV_EVENT_VALUE_CHANGED, NULL);
+        custom_cbs[i] = cb;
+
+        // Trash button removes this custom from the library.
+        lv_obj_t* trash = lv_btn_create(row);
+        lv_obj_set_size(trash, 44, 32);
+        lv_obj_align(trash, LV_ALIGN_RIGHT_MID, 0, 0);
+        lv_obj_set_style_bg_opa(trash,        LV_OPA_TRANSP, LV_PART_MAIN);
+        lv_obj_set_style_shadow_width(trash,  0,             LV_PART_MAIN);
+        lv_obj_set_style_border_width(trash,  0,             LV_PART_MAIN);
+        lv_obj_t* tl = lv_label_create(trash);
+        lv_obj_set_style_text_color(tl, SS_RED, LV_PART_MAIN);
+        lv_label_set_text(tl, LV_SYMBOL_TRASH);
+        lv_obj_center(tl);
+        lv_obj_add_event_cb(trash, custom_remove_cb, LV_EVENT_CLICKED, (void*)(intptr_t)i);
+    }
+
+    // "+ Add custom ticker" row opens the keyboard sub-page.
+    lv_obj_t* add_row = make_nav_row(page_assets, LV_SYMBOL_PLUS "  Add custom ticker", nullptr);
+    lv_obj_add_event_cb(add_row, go_addsym_cb, LV_EVENT_CLICKED, NULL);
 
     refresh_asset_count_lbl();
     make_spacer(page_assets, 8);
@@ -1155,6 +1393,7 @@ void settings_screen_create(const Settings* initial) {
     // Build all pages (only page_main starts visible)
     build_main_page();
     build_assets_page();
+    build_addsym_page();
     build_tf_page();
     build_tz_page();
     build_theme_page();
@@ -1178,6 +1417,57 @@ void settings_screen_get(Settings* out) {
     *out = ss_work;
 }
 
+bool settings_screen_take_probe_request(char* out_sym) {
+    if (!ss_probe_req) return false;
+    ss_probe_req = false;
+    strncpy(out_sym, ss_probe_sym, ASSET_SYM_LEN - 1);
+    out_sym[ASSET_SYM_LEN - 1] = '\0';
+    return true;
+}
+
+void settings_screen_apply_probe_result(const AssetProbeResult* res) {
+    if (!res) return;
+    if (addsym_btn) lv_obj_clear_state(addsym_btn, LV_STATE_DISABLED);
+
+    if (!res->ok) {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "Not found: %s", res->err);
+        set_addsym_status(buf, SS_RED);
+        return;
+    }
+
+    // Add to the library and persist immediately (independent of Save/Cancel).
+    if (!custom_add(&res->def, false)) {
+        set_addsym_status("Could not add ticker", SS_RED);
+        return;
+    }
+    custom_save_to_nvs();
+
+    // Auto-select the new ticker if there's a free slot among the 6.
+    bool selected = false;
+    if (ss_work.asset_count < MAX_ASSETS) {
+        bool present = false;
+        for (int j = 0; j < ss_work.asset_count; j++)
+            if (strcmp(ss_work.assets[j], res->def.symbol) == 0) { present = true; break; }
+        if (!present) {
+            strncpy(ss_work.assets[ss_work.asset_count], res->def.symbol, ASSET_SYM_LEN - 1);
+            ss_work.assets[ss_work.asset_count][ASSET_SYM_LEN - 1] = '\0';
+            ss_work.asset_count++;
+            selected = true;
+        }
+    }
+
+    if (addsym_ta) lv_textarea_set_text(addsym_ta, "");
+    char buf[64];
+    snprintf(buf, sizeof(buf),
+             selected ? "Added & selected: %s" : "Added: %s (slots full)",
+             res->def.symbol);
+    set_addsym_status(buf, SS_GREEN);
+
+    rebuild_assets_page(false);   // refresh the (hidden) assets page in the background
+    update_main_assets_label();
+}
+
 lv_obj_t* settings_screen_detach() {
     lv_obj_t* scr = ss_scr;
     // Null all handles so no dangling pointer writes happen if any LVGL
@@ -1189,6 +1479,7 @@ lv_obj_t* settings_screen_detach() {
     cur_page     = nullptr;
     page_main    = nullptr;
     page_assets  = nullptr;
+    page_addsym  = nullptr;
     page_tf      = nullptr;
     page_tz      = nullptr;
     page_theme   = nullptr;
@@ -1198,6 +1489,12 @@ lv_obj_t* settings_screen_detach() {
     page_diag    = nullptr;
     asset_count_lbl = nullptr;
     for (int i = 0; i < TOTAL_ASSETS; i++) asset_cbs[i] = nullptr;
+    for (int i = 0; i < MAX_CUSTOM;   i++) custom_cbs[i] = nullptr;
+    addsym_ta     = nullptr;
+    addsym_kb     = nullptr;
+    addsym_status = nullptr;
+    addsym_btn    = nullptr;
+    ss_probe_req  = false;
     for (int i = 0; i < 4; i++) tf_cbs[i] = nullptr;
     tz_roller     = nullptr;
     for (int i = 0; i < 4; i++) { theme_rows[i] = nullptr; theme_checks[i] = nullptr; }
