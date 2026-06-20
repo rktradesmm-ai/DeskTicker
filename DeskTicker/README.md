@@ -116,10 +116,11 @@ into your Arduino `libraries` directory.
 
 1. Power on the device. It shows the **DeskTicker Setup** screen.
 2. On your phone or laptop, connect to WiFi: **`DeskTicker-Setup`**
-3. Open a browser and go to **`192.168.4.1`** (captive portal may open automatically).
+3. Wait a few seconds — the setup page should **pop up automatically** (captive portal).
+   If it doesn't, open a browser and go to **`192.168.4.1`**.
 4. Configure:
    - **WiFi** — your network name and password
-   - **Assets** — pick up to 6, grouped by class (Crypto / Stocks & ETFs / Commodities / Forex). You can also type a **Custom** Yahoo Finance symbol — see [Custom Tickers](#custom-tickers)
+   - **Assets** — pick up to 6, grouped by class (Crypto / Stocks & ETFs / Commodities / Forex). A live **(N/6)** counter shows how many are selected. You can also add up to **6 custom Yahoo Finance tickers** here — see [Custom Tickers](#custom-tickers)
    - **Timeframes** — select one or more (15m / 1h / 4h / 1D); swipe up/down on the chart to cycle between them
    - **Timezone** — UTC offset for your location
    - **Candle Colour** — Classic, Color Shift, Neon Pulse, or Custom
@@ -175,12 +176,19 @@ asset picker right alongside the built-ins. Use the symbol exactly as Yahoo Fina
 A brief (~1–3 s) screen freeze during the check is normal — it's the same pause as a regular
 data fetch.
 
-### Add one during first-time setup
+### Add some during first-time setup
 
-The setup web form has a **Custom** field in the Assets card. Because the setup hotspot has no
-internet, the symbol can't be checked at that moment — it is saved and **classified
-automatically the first time it loads** after the device joins your WiFi. Until then its row
-shows **`[Pending]`**.
+The setup web form's Assets card has a **Custom tickers** list. Tap **+ Add custom ticker** to
+add a row (up to **6**), type the symbol, and tick **show** to display it as a live chart; use
+**✕** to delete a row. The **(N/6)** counter at the top of the Assets card counts built-ins plus
+ticked customs together (6 active maximum).
+
+Because the setup hotspot has no internet, custom symbols can't be checked at that moment — each
+is saved and **classified automatically the first time it loads** after the device joins your
+WiFi. Until then its row in **Settings → Assets** shows **`[Pending]`**.
+
+> An invalid/mistyped custom symbol simply shows **"No data"** on its chart — you can still swipe
+> past it and remove it later in **Settings → Assets** (🗑); it will not lock up the device.
 
 ### Confirming the detected class
 

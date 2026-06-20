@@ -286,7 +286,16 @@ Users can add arbitrary Yahoo symbols on top of the built-in `ASSETS[]` table.
   the heap-exhaustion crash). After the first successful fetch, `S_FETCH` probes it once via
   `custom_is_provisional()` → `api_probe_symbol()` → `custom_update()`, then persists and clears
   the flag. The settings UI shows the detected class per row (`[Stock]`/`[Crypto]`/…, or
-  `[Pending]` while provisional).
+  `[Pending]` while provisional). The setup web form (`wifi_manager.cpp build_html`) offers a
+  JS-managed list of up to `MAX_CUSTOM` rows (add / delete / tick "show" to mark active);
+  `handle_save()` parses repeated `custom=` (→ library) and `casset=` (→ active `assets[]`) args,
+  and the Assets card shows a live `(N/6)` counter (`aTotal()`/`updCount()`/`checkMax()`).
+- **Invalid symbol (no trap):** a bad/mistyped custom returns HTTP 400 and the chart shows
+  "No data". To keep it from hanging the device, `is_after_hours()` returns `false` whenever
+  `!asset_data[idx].valid` (a failed fetch carries no market state) so a failed asset can't bounce
+  `S_CHART`→`S_FETCH` before swipe/tap are read, and the `S_FETCH` failure path builds the chart
+  even when none exists yet — so the user can always swipe away or triple-tap into Settings to
+  remove it. (This was a hard hang before the fix; see Market-Hours Detection below.)
 - **Limits:** library holds `MAX_CUSTOM` (6); the on-screen selection cap is still `MAX_ASSETS`
   (6) shared by built-ins + customs. Probe uses the typed symbol as both display symbol and
   Yahoo query (v1), so symbols must fit `ASSET_SYM_LEN−1` (9 chars).
@@ -318,6 +327,12 @@ Detection now uses two surviving `meta` fields, parsed into `AssetData`:
 - `regularMarketTime` → `reg_mkt_time` (last-trade epoch s): fresh during a live
   session, ≥1 day stale on a holiday. `last_trade_stale()` flags stale > `HOLIDAY_STALE_SECS`
   (2 h) to detect bank holidays for FX/futures.
+
+**Invalid-data guard:** `is_after_hours()` returns `false` immediately when `!d->valid`
+(a failed/empty fetch has no usable market state). Without this, an asset that fails to fetch
+(e.g. a mistyped custom symbol → HTTP 400) falls through to the NYSE-ET failsafe below, reports
+after-hours on ET evenings/weekends, and bounces `S_CHART`→`S_FETCH` *before* swipe/tap are read
+— trapping the user on the bad ticker. Keep this guard.
 
 Rules: Crypto/Commodity always live · Forex = local session Sun 17:00→Fri 17:00 ET
 (`fx_session_open`) or stale-trade · Futures = local Globex Sun 18:00→Fri 17:00 ET
