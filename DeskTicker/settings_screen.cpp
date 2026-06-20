@@ -422,6 +422,19 @@ static void asset_cb_handler(lv_event_t* e) {
 
 // ── Custom-ticker UI ──────────────────────────────────────────────────────────
 
+// Human-readable asset class for a definition, shown so the user can confirm the
+// device classified their custom ticker correctly (drives market-hours behavior).
+static const char* asset_class_label(const AssetDef* d) {
+    if (!d) return "?";
+    switch (d->market) {
+        case MARKET_CRYPTO:    return "Crypto";
+        case MARKET_FOREX:     return "Forex";
+        case MARKET_COMMODITY: return "Commodity";
+        case MARKET_STOCK:
+        default:               return d->continuous ? "Futures" : "Stock";
+    }
+}
+
 // Set the add-ticker status line text + color.
 static void set_addsym_status(const char* msg, lv_color_t color) {
     if (!addsym_status) return;
@@ -889,8 +902,12 @@ static void build_assets_page() {
         lv_obj_clear_flag(row, LV_OBJ_FLAG_CLICKABLE);
 
         lv_obj_t* cb = lv_checkbox_create(row);
-        char lbl_buf[40];
-        snprintf(lbl_buf, sizeof(lbl_buf), "%-6s %s", d->symbol, d->name);
+        // Show "SYM  [Class] Name" so the detected asset class is always visible.
+        // Portal-added tickers read "Pending" until classified on first connect.
+        const char* cls = custom_is_provisional(d->symbol) ? "Pending"
+                                                            : asset_class_label(d);
+        char lbl_buf[48];
+        snprintf(lbl_buf, sizeof(lbl_buf), "%-6s [%s] %s", d->symbol, cls, d->name);
         lv_checkbox_set_text(cb, lbl_buf);
         lv_obj_set_style_text_font(cb,  &lv_font_montserrat_14, LV_PART_MAIN);
         lv_obj_set_style_text_color(cb, SS_TEXT,                LV_PART_MAIN);
@@ -1458,10 +1475,13 @@ void settings_screen_apply_probe_result(const AssetProbeResult* res) {
     }
 
     if (addsym_ta) lv_textarea_set_text(addsym_ta, "");
-    char buf[64];
-    snprintf(buf, sizeof(buf),
-             selected ? "Added & selected: %s" : "Added: %s (slots full)",
-             res->def.symbol);
+    // Spell out the auto-detected class / name / decimals so the user can confirm
+    // the device identified the ticker correctly.
+    char buf[128];
+    snprintf(buf, sizeof(buf), "%s\n%s  -  %s\n%s  (%d dp)",
+             selected ? "Added & selected:" : "Added (slots full):",
+             res->def.symbol, asset_class_label(&res->def),
+             res->def.name, (int)res->def.decimals);
     set_addsym_status(buf, SS_GREEN);
 
     rebuild_assets_page(false);   // refresh the (hidden) assets page in the background
