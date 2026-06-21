@@ -14,6 +14,7 @@
 #include "tz_options.h"
 #include "chart_screen.h"   // SCR_W, SCR_H
 #include "display.h"        // bsp_display_brightness_set
+#include "version.h"        // FW_VERSION / FW_DATE
 
 // ── Color constants (match chart_screen dark theme) ───────────────────────────
 #define SS_BG       lv_color_hex(0x0E1117)   // Deep Space
@@ -1343,7 +1344,8 @@ static void build_diag_page() {
     };
 
     make_diag_row(page_diag, &diag_fw_lbl);
-    lv_label_set_text(diag_fw_lbl, "Build: " __DATE__ " " __TIME__);
+    // Customer-facing version (compare against the web updater page) + build stamp
+    lv_label_set_text(diag_fw_lbl, "Firmware: v" FW_VERSION "  (" FW_DATE ")");
 
     make_diag_row(page_diag, &diag_heap_lbl);
     make_diag_row(page_diag, &diag_psram_lbl);

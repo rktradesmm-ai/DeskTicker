@@ -91,6 +91,9 @@
             border:1px solid var(--line); border-radius:8px; cursor:zoom-in; }
     .shot-narrow { max-width:300px; }
     .caption { color: var(--muted); font-size: 13px; }
+    .ver { text-align:center; margin: 14px 0 0; color: var(--text); font-size: 14px; }
+    .ver strong { color: var(--bull); }
+    .ver .date { color: var(--muted); }
     code { background: #1d2731; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
     footer { text-align: center; color: var(--muted); font-size: 13px; margin-top: 40px; }
   </style>
@@ -98,7 +101,7 @@
 <body>
   <div class="wrap">
     <header>
-      <div class="word"><span class="d">Desk</span>Ticker</div>
+      <div class="word"><span class="d">D</span>esk<span class="t">T</span>icker</div>
       <div class="tag">Firmware Updater</div>
     </header>
 
@@ -126,7 +129,7 @@
               <img class="shot shot-narrow" src="img/COM-flash-edit.png"
                    alt="Choose the port labelled USB JTAG/serial debug unit" />
             </a>
-            <span class="caption">Tap the picture to enlarge.</span></li>
+            <span class="caption">Tap the photo to enlarge.</span></li>
         <li>To <span class="ok">keep your settings</span> (Wi-Fi, tickers, theme),
             leave the <em>“Erase device”</em> box <strong>unchecked</strong>.
             Tick it only for a clean reset / recovery.</li>
@@ -144,6 +147,8 @@
           </span>
         </esp-web-install-button>
       </div>
+      <p class="ver">Latest firmware: <strong>v1.0.0</strong>
+         <span class="date">· released 21 Jun 2026</span></p>
     </div>
 
     <div class="card">

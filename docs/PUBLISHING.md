@@ -8,6 +8,12 @@ IDE — only **you** (the maintainer) do, to produce the binaries.
 
 ## 1. Build the firmware in Arduino IDE
 
+**First, bump the version** in `DeskTicker/version.h` — set `FW_VERSION` and
+`FW_DATE` to the new release. This is what shows on the device's *About /
+Diagnostics* screen, so it must match the `version` in `manifest.json` and the
+"Latest firmware" line on the page. Customers compare the two to know if they're
+up to date.
+
 Open `DeskTicker/DeskTicker.ino` and set **Tools** exactly as the product ships:
 
 - **Board:** ESP32S3 Dev Module (JC3248W535C)
